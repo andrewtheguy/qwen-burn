@@ -1,15 +1,22 @@
 /// Qwen3-ASR Audio Encoder.
 /// Conv2D stem (per-chunk) → sinusoidal PE → windowed Transformer → projector.
-use candle_core::{Device, Module, Result, Tensor};
-use candle_nn::{Conv2d, Conv2dConfig, LayerNorm, LayerNormConfig, Linear, VarBuilder};
+use burn::nn::{conv::Conv2d, LayerNorm, Linear};
+use burn::tensor::activation::{gelu, softmax};
+use burn::tensor::{Tensor, TensorData};
+
+use crate::weights::Tensors;
+use crate::{B, Device};
 
 // 0.6B encoder config
 const D_MODEL: usize = 896;
 const N_LAYERS: usize = 18;
 const N_HEADS: usize = 14;
 const HEAD_DIM: usize = D_MODEL / N_HEADS; // 64
+#[allow(dead_code)]
 const FFN_DIM: usize = 3584;
+#[allow(dead_code)]
 const OUTPUT_DIM: usize = 1024;
+#[allow(dead_code)]
 const DOWNSAMPLE_HIDDEN: usize = 480;
 const N_WINDOW: usize = 50;
 const N_WINDOW_INFER: usize = 800;
@@ -17,162 +24,164 @@ const CHUNK_SIZE: usize = N_WINDOW * 2; // 100 mel frames per chunk
 const NUM_MEL_BINS: usize = 128;
 
 struct EncoderAttention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    out_proj: Linear,
+    q_proj: Linear<B>,
+    k_proj: Linear<B>,
+    v_proj: Linear<B>,
+    out_proj: Linear<B>,
 }
 
 impl EncoderAttention {
-    fn load(vb: VarBuilder) -> Result<Self> {
+    fn load(tensors: &Tensors, prefix: &str, device: &Device) -> anyhow::Result<Self> {
         Ok(Self {
-            q_proj: candle_nn::linear(D_MODEL, D_MODEL, vb.pp("q_proj"))?,
-            k_proj: candle_nn::linear(D_MODEL, D_MODEL, vb.pp("k_proj"))?,
-            v_proj: candle_nn::linear(D_MODEL, D_MODEL, vb.pp("v_proj"))?,
-            out_proj: candle_nn::linear(D_MODEL, D_MODEL, vb.pp("out_proj"))?,
+            q_proj: tensors.load_linear(&format!("{prefix}.q_proj"), device)?,
+            k_proj: tensors.load_linear(&format!("{prefix}.k_proj"), device)?,
+            v_proj: tensors.load_linear(&format!("{prefix}.v_proj"), device)?,
+            out_proj: tensors.load_linear(&format!("{prefix}.out_proj"), device)?,
         })
     }
 
     /// Bidirectional attention over a window slice. x: [seq, d_model]
-    fn forward_window(&self, x: &Tensor) -> Result<Tensor> {
-        let seq_len = x.dim(0)?;
-        let q = self.q_proj.forward(x)?;
-        let k = self.k_proj.forward(x)?;
-        let v = self.v_proj.forward(x)?;
+    fn forward_window(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+        let seq_len = x.dims()[0];
+        let q = self.q_proj.forward(x.clone());
+        let k = self.k_proj.forward(x.clone());
+        let v = self.v_proj.forward(x);
 
-        // Reshape to [1, n_heads, seq, head_dim], ensure contiguous for Metal
+        // Reshape to [1, n_heads, seq, head_dim]
         let q = q
-            .reshape((seq_len, N_HEADS, HEAD_DIM))?
-            .transpose(0, 1)?
-            .unsqueeze(0)?
-            .contiguous()?;
+            .reshape([seq_len, N_HEADS, HEAD_DIM])
+            .swap_dims(0, 1)
+            .unsqueeze::<4>();
         let k = k
-            .reshape((seq_len, N_HEADS, HEAD_DIM))?
-            .transpose(0, 1)?
-            .unsqueeze(0)?
-            .contiguous()?;
+            .reshape([seq_len, N_HEADS, HEAD_DIM])
+            .swap_dims(0, 1)
+            .unsqueeze::<4>();
         let v = v
-            .reshape((seq_len, N_HEADS, HEAD_DIM))?
-            .transpose(0, 1)?
-            .unsqueeze(0)?
-            .contiguous()?;
+            .reshape([seq_len, N_HEADS, HEAD_DIM])
+            .swap_dims(0, 1)
+            .unsqueeze::<4>();
 
         let scale = 1.0 / (HEAD_DIM as f64).sqrt();
-        let scores = (q.matmul(&k.transpose(2, 3)?.contiguous()?)? * scale)?;
-        let probs = candle_nn::ops::softmax_last_dim(&scores)?;
-        let ctx = probs.matmul(&v)?; // [1, n_heads, seq, head_dim]
+        let scores = q.matmul(k.swap_dims(2, 3)).mul_scalar(scale);
+        let probs = softmax(scores, 3);
+        let ctx = probs.matmul(v); // [1, n_heads, seq, head_dim]
 
         let out = ctx
-            .squeeze(0)?
-            .transpose(0, 1)?
-            .contiguous()?
-            .reshape((seq_len, D_MODEL))?;
-        self.out_proj.forward(&out)
+            .squeeze::<3>()
+            .swap_dims(0, 1)
+            .reshape([seq_len, D_MODEL]);
+        self.out_proj.forward(out)
     }
 }
 
 struct EncoderLayer {
     self_attn: EncoderAttention,
-    self_attn_layer_norm: LayerNorm,
-    fc1: Linear,
-    fc2: Linear,
-    final_layer_norm: LayerNorm,
+    self_attn_layer_norm: LayerNorm<B>,
+    fc1: Linear<B>,
+    fc2: Linear<B>,
+    final_layer_norm: LayerNorm<B>,
 }
 
 impl EncoderLayer {
-    fn load(vb: VarBuilder) -> Result<Self> {
-        let ln_cfg = LayerNormConfig {
-            eps: 1e-5,
-            remove_mean: true,
-            affine: true,
-        };
+    fn load(tensors: &Tensors, prefix: &str, device: &Device) -> anyhow::Result<Self> {
         Ok(Self {
-            self_attn: EncoderAttention::load(vb.pp("self_attn"))?,
-            self_attn_layer_norm: candle_nn::layer_norm(D_MODEL, ln_cfg, vb.pp("self_attn_layer_norm"))?,
-            fc1: candle_nn::linear(D_MODEL, FFN_DIM, vb.pp("fc1"))?,
-            fc2: candle_nn::linear(FFN_DIM, D_MODEL, vb.pp("fc2"))?,
-            final_layer_norm: candle_nn::layer_norm(D_MODEL, ln_cfg, vb.pp("final_layer_norm"))?,
+            self_attn: EncoderAttention::load(tensors, &format!("{prefix}.self_attn"), device)?,
+            self_attn_layer_norm: tensors.load_layer_norm(
+                &format!("{prefix}.self_attn_layer_norm"),
+                1e-5,
+                device,
+            )?,
+            fc1: tensors.load_linear(&format!("{prefix}.fc1"), device)?,
+            fc2: tensors.load_linear(&format!("{prefix}.fc2"), device)?,
+            final_layer_norm: tensors.load_layer_norm(
+                &format!("{prefix}.final_layer_norm"),
+                1e-5,
+                device,
+            )?,
         })
     }
 
-    fn forward(&self, x: &Tensor, cu_seqlens: &[usize]) -> Result<Tensor> {
+    fn forward(&self, x: Tensor<B, 2>, cu_seqlens: &[usize]) -> Tensor<B, 2> {
         // Pre-attention layernorm
-        let x_norm = self.self_attn_layer_norm.forward(x)?;
+        let x_norm = self.self_attn_layer_norm.forward(x.clone());
 
         // Windowed attention
         let attn_out = if cu_seqlens.len() <= 2 {
-            self.self_attn.forward_window(&x_norm)?
+            self.self_attn.forward_window(x_norm)
         } else {
             let mut outputs = Vec::new();
             for i in 0..cu_seqlens.len() - 1 {
                 let start = cu_seqlens[i];
                 let end = cu_seqlens[i + 1];
-                let window = x_norm.narrow(0, start, end - start)?;
-                outputs.push(self.self_attn.forward_window(&window)?);
+                let window = x_norm.clone().narrow(0, start, end - start);
+                outputs.push(self.self_attn.forward_window(window));
             }
-            Tensor::cat(&outputs, 0)?
+            Tensor::cat(outputs, 0)
         };
 
-        let x = (x + attn_out)?;
+        let x = x + attn_out;
 
         // Pre-FFN layernorm
-        let x_norm = self.final_layer_norm.forward(&x)?;
-        let ffn = self.fc1.forward(&x_norm)?.gelu()?;
-        let ffn = self.fc2.forward(&ffn)?;
+        let x_norm = self.final_layer_norm.forward(x.clone());
+        let ffn = gelu(self.fc1.forward(x_norm));
+        let ffn = self.fc2.forward(ffn);
         x + ffn
     }
 }
 
 pub struct AudioEncoder {
-    conv2d1: Conv2d,
-    conv2d2: Conv2d,
-    conv2d3: Conv2d,
-    conv_out: Tensor, // weight only, no bias — [d_model, 7680]
+    conv2d1: Conv2d<B>,
+    conv2d2: Conv2d<B>,
+    conv2d3: Conv2d<B>,
+    conv_out: Tensor<B, 2>, // weight only, no bias — [d_model, 7680]
     layers: Vec<EncoderLayer>,
-    ln_post: LayerNorm,
-    proj1: Linear,
-    proj2: Linear,
+    ln_post: LayerNorm<B>,
+    proj1: Linear<B>,
+    proj2: Linear<B>,
     device: Device,
 }
 
 impl AudioEncoder {
-    pub fn load(vb: VarBuilder, device: &Device) -> Result<Self> {
-        let conv_cfg = Conv2dConfig {
-            stride: 2,
-            padding: 1,
-            ..Default::default()
-        };
-        let conv2d1 = candle_nn::conv2d(1, DOWNSAMPLE_HIDDEN, 3, conv_cfg, vb.pp("conv2d1"))?;
-        let conv2d2 = candle_nn::conv2d(
-            DOWNSAMPLE_HIDDEN,
-            DOWNSAMPLE_HIDDEN,
-            3,
-            conv_cfg,
-            vb.pp("conv2d2"),
+    pub fn load(tensors: &Tensors, prefix: &str, device: &Device) -> anyhow::Result<Self> {
+        let conv2d1 = tensors.load_conv2d(
+            &format!("{prefix}.conv2d1"),
+            [2, 2],
+            [3, 3],
+            [1, 1],
+            1,
+            device,
         )?;
-        let conv2d3 = candle_nn::conv2d(
-            DOWNSAMPLE_HIDDEN,
-            DOWNSAMPLE_HIDDEN,
-            3,
-            conv_cfg,
-            vb.pp("conv2d3"),
+        let conv2d2 = tensors.load_conv2d(
+            &format!("{prefix}.conv2d2"),
+            [2, 2],
+            [3, 3],
+            [1, 1],
+            1,
+            device,
         )?;
-        let conv_out = vb.get((D_MODEL, DOWNSAMPLE_HIDDEN * NUM_MEL_BINS / 8), "conv_out.weight")?;
+        let conv2d3 = tensors.load_conv2d(
+            &format!("{prefix}.conv2d3"),
+            [2, 2],
+            [3, 3],
+            [1, 1],
+            1,
+            device,
+        )?;
+        let conv_out =
+            tensors.load_tensor::<2>(&format!("{prefix}.conv_out.weight"), device)?;
 
         let mut layers = Vec::with_capacity(N_LAYERS);
-        let vb_l = vb.pp("layers");
         for i in 0..N_LAYERS {
-            layers.push(EncoderLayer::load(vb_l.pp(i))?);
+            layers.push(EncoderLayer::load(
+                tensors,
+                &format!("{prefix}.layers.{i}"),
+                device,
+            )?);
         }
 
-        let ln_cfg = LayerNormConfig {
-            eps: 1e-5,
-            remove_mean: true,
-            affine: true,
-        };
-        let ln_post = candle_nn::layer_norm(D_MODEL, ln_cfg, vb.pp("ln_post"))?;
-        let proj1 = candle_nn::linear(D_MODEL, D_MODEL, vb.pp("proj1"))?;
-        let proj2 = candle_nn::linear(D_MODEL, OUTPUT_DIM, vb.pp("proj2"))?;
+        let ln_post = tensors.load_layer_norm(&format!("{prefix}.ln_post"), 1e-5, device)?;
+        let proj1 = tensors.load_linear(&format!("{prefix}.proj1"), device)?;
+        let proj2 = tensors.load_linear(&format!("{prefix}.proj2"), device)?;
 
         Ok(Self {
             conv2d1,
@@ -188,7 +197,7 @@ impl AudioEncoder {
     }
 
     /// mel: flat [NUM_MEL_BINS, n_frames] row-major f32 slice
-    pub fn forward(&self, mel: &[f32], n_frames: usize) -> Result<Tensor> {
+    pub fn forward(&self, mel: &[f32], n_frames: usize) -> Tensor<B, 2> {
         // ── Conv2D stem (per-chunk) ──
         let mut chunk_outputs = Vec::new();
 
@@ -204,50 +213,53 @@ impl AudioEncoder {
                     chunk_data[m * chunk_len + t] = mel[m * n_frames + start + t];
                 }
             }
-            let x = Tensor::from_vec(chunk_data, (1, 1, NUM_MEL_BINS, chunk_len), &self.device)?;
+            let x = Tensor::<B, 4>::from_data(
+                TensorData::new(chunk_data, [1, 1, NUM_MEL_BINS, chunk_len]),
+                &self.device,
+            );
 
             // 3 x Conv2D + GELU
-            let x = self.conv2d1.forward(&x)?.gelu()?;
-            let x = self.conv2d2.forward(&x)?.gelu()?;
-            let x = self.conv2d3.forward(&x)?.gelu()?;
+            let x = gelu(self.conv2d1.forward(x));
+            let x = gelu(self.conv2d2.forward(x));
+            let x = gelu(self.conv2d3.forward(x));
 
             // x: [1, 480, freq, time] → [time, 480*freq]
-            let (_, c, f, t) = x.dims4()?;
-            let x = x
-                .permute((0, 3, 1, 2))?
-                .contiguous()?
-                .reshape((t, c * f))?;
+            let [_, c, f, t] = x.dims();
+            let x = x.permute([0, 3, 1, 2]).reshape([t, c * f]);
             chunk_outputs.push(x);
 
             start += CHUNK_SIZE;
         }
 
         // Concatenate chunks → [total_tokens, 480*freq]
-        let x = Tensor::cat(&chunk_outputs, 0)?;
-        let total_tokens = x.dim(0)?;
+        let x = Tensor::cat(chunk_outputs.clone(), 0);
+        let total_tokens = x.dims()[0];
 
         // Linear projection: [total_tokens, 7680] → [total_tokens, d_model]
-        let x = x.matmul(&self.conv_out.t()?)?;
+        let x = x.matmul(self.conv_out.clone().transpose());
 
         // ── Per-chunk sinusoidal position embeddings ──
-        let tokens_per_chunk = chunk_outputs[0].dim(0)?;
-        let pos_emb = sinusoidal_position_embedding(tokens_per_chunk, D_MODEL, &self.device)?;
+        let tokens_per_chunk = chunk_outputs[0].dims()[0];
+        let pos_emb = sinusoidal_position_embedding(tokens_per_chunk, D_MODEL, &self.device);
 
         let mut x = x;
         let mut offset = 0;
         for co in &chunk_outputs {
-            let clen = co.dim(0)?;
-            let pe_slice = pos_emb.narrow(0, 0, clen)?;
-            let x_slice = x.narrow(0, offset, clen)?;
-            let updated = (&x_slice + &pe_slice)?;
-            x = Tensor::cat(
-                &[
-                    &x.narrow(0, 0, offset)?,
-                    &updated,
-                    &x.narrow(0, offset + clen, total_tokens - offset - clen)?,
-                ],
-                0,
-            )?;
+            let clen = co.dims()[0];
+            let pe_slice = pos_emb.clone().narrow(0, 0, clen);
+            let x_slice = x.clone().narrow(0, offset, clen);
+            let updated = x_slice + pe_slice;
+
+            let mut parts = Vec::new();
+            if offset > 0 {
+                parts.push(x.clone().narrow(0, 0, offset));
+            }
+            parts.push(updated);
+            let tail = total_tokens - offset - clen;
+            if tail > 0 {
+                parts.push(x.clone().narrow(0, offset + clen, tail));
+            }
+            x = Tensor::cat(parts, 0);
             offset += clen;
         }
 
@@ -264,13 +276,13 @@ impl AudioEncoder {
         // ── Transformer layers ──
         let mut h = x;
         for layer in &self.layers {
-            h = layer.forward(&h, &cu_seqlens)?;
+            h = layer.forward(h, &cu_seqlens);
         }
 
         // ── Final LayerNorm + projection ──
-        let h = self.ln_post.forward(&h)?;
-        let h = self.proj1.forward(&h)?.gelu()?;
-        self.proj2.forward(&h)
+        let h = self.ln_post.forward(h);
+        let h = gelu(self.proj1.forward(h));
+        self.proj2.forward(h)
     }
 }
 
@@ -279,7 +291,7 @@ fn sinusoidal_position_embedding(
     length: usize,
     channels: usize,
     device: &Device,
-) -> Result<Tensor> {
+) -> Tensor<B, 2> {
     let half = channels / 2;
     let log_timescale = (10000.0f64).ln() / (half - 1) as f64;
     let inv_timescales: Vec<f32> = (0..half)
@@ -294,5 +306,5 @@ fn sinusoidal_position_embedding(
             data[t * channels + half + i] = angle.cos();
         }
     }
-    Tensor::from_vec(data, (length, channels), device)
+    Tensor::<B, 2>::from_data(TensorData::new(data, [length, channels]), device)
 }

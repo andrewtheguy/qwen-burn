@@ -29,7 +29,7 @@ fn parse_device(s: &str) -> Result<Device> {
         "metal" | "mps" => {
             #[cfg(feature = "metal")]
             {
-                Ok(Device::new_metal(0)?)
+                Ok(Device::metal(0))
             }
             #[cfg(not(feature = "metal"))]
             {
@@ -39,7 +39,7 @@ fn parse_device(s: &str) -> Result<Device> {
         "cuda" => {
             #[cfg(feature = "cuda")]
             {
-                Ok(Device::new_cuda(0)?)
+                Ok(Device::cuda(0))
             }
             #[cfg(not(feature = "cuda"))]
             {

@@ -1,5 +1,4 @@
-use crate::{QwenAsr as RustQwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
-use candle_core::Device;
+use crate::{QwenAsr as RustQwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES, Device};
 use numpy::PyReadonlyArray1;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 use std::sync::Mutex;
@@ -10,7 +9,7 @@ fn parse_device(device: &str) -> PyResult<Device> {
         "metal" | "mps" => {
             #[cfg(feature = "metal")]
             {
-                Device::new_metal(0).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+                Ok(Device::metal(0))
             }
             #[cfg(not(feature = "metal"))]
             {
@@ -22,7 +21,7 @@ fn parse_device(device: &str) -> PyResult<Device> {
         "cuda" => {
             #[cfg(feature = "cuda")]
             {
-                Device::new_cuda(0).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+                Ok(Device::cuda(0))
             }
             #[cfg(not(feature = "cuda"))]
             {
