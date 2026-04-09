@@ -16,8 +16,9 @@ const TOKEN_AUDIO_START: u32 = 151669;
 const TOKEN_AUDIO_END: u32 = 151670;
 const TOKEN_AUDIO_PAD: u32 = 151676;
 const TOKEN_ENDOFTEXT: u32 = 151643;
+const TOKEN_ASR_TEXT: u32 = 151704;
 
-// Prompt template (from tokenizer)
+// Prompt template
 const PROMPT_PREFIX: &[u32] = &[
     TOKEN_IM_START, 8948, 198, TOKEN_IM_END, 198,
     TOKEN_IM_START, 872, 198, TOKEN_AUDIO_START,
@@ -27,12 +28,64 @@ const PROMPT_SUFFIX: &[u32] = &[
     TOKEN_IM_START, 77091, 198,
 ];
 
+// Supported languages (from config.json support_languages)
+const SUPPORTED_LANGUAGES: &[&str] = &[
+    "Chinese", "English", "Cantonese", "Arabic", "German", "French",
+    "Spanish", "Portuguese", "Indonesian", "Italian", "Korean", "Russian",
+    "Thai", "Vietnamese", "Japanese", "Turkish", "Hindi", "Malay",
+    "Dutch", "Swedish", "Danish", "Finnish", "Polish", "Czech",
+    "Filipino", "Persian", "Greek", "Romanian", "Hungarian", "Macedonian",
+];
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        bail!("Usage: {} <model_dir>", args[0]);
+    let mut model_dir = None;
+    let mut language: Option<String> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--language" | "-l" => {
+                i += 1;
+                if i >= args.len() {
+                    bail!("--language requires a value");
+                }
+                language = Some(args[i].clone());
+            }
+            arg if !arg.starts_with('-') => {
+                model_dir = Some(PathBuf::from(arg));
+            }
+            "--help" | "-h" => {
+                eprintln!("Usage: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle <model_dir> [--language <lang>]");
+                eprintln!();
+                eprintln!("Arguments:");
+                eprintln!("  <model_dir>        Path to Qwen3-ASR-0.6B model directory");
+                eprintln!("  --language <lang>  Force output language (e.g. English, Chinese, Japanese)");
+                eprintln!();
+                eprintln!("Supported languages:");
+                eprintln!("  {}", SUPPORTED_LANGUAGES.join(", "));
+                eprintln!();
+                eprintln!("Examples:");
+                eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle ./qwen3-asr-0.6b");
+                eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle ./qwen3-asr-0.6b -l Japanese");
+                std::process::exit(0);
+            }
+            _ => bail!("Unknown argument: {}", args[i]),
+        }
+        i += 1;
     }
-    let model_dir = PathBuf::from(&args[1]);
+
+    let model_dir = model_dir.context(
+        "Usage: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | \
+         qwencandle <model_dir> [--language <lang>]\n\n\
+         Arguments:\n  \
+           <model_dir>        Path to Qwen3-ASR-0.6B model directory\n  \
+           --language <lang>  Force output language (e.g. English, Chinese, Japanese)\n\n\
+         Input: WAV float32 16kHz mono on stdin\n\n\
+         Examples:\n  \
+           ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle ./qwen3-asr-0.6b\n  \
+           ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle ./qwen3-asr-0.6b -l Japanese",
+    )?;
 
     // ── Read WAV from stdin ──
     let samples = read_wav_stdin()?;
@@ -64,15 +117,38 @@ fn main() -> Result<()> {
     let n_audio = audio_embeds.dim(0)?;
     eprintln!("Audio embeddings: [{}, {}]", n_audio, audio_embeds.dim(1)?);
 
+    // ── Tokenizer ──
+    let tok = tokenizer::Tokenizer::load(&model_dir)?;
+
     // ── Decoder ──
     eprintln!("Loading decoder...");
     let mut dec = decoder::Decoder::load(vb.pp("thinker"), &device)?;
 
     // ── Build prompt ──
+    let lang_tokens = match &language {
+        Some(lang) => {
+            // Validate language
+            if !SUPPORTED_LANGUAGES.iter().any(|&l| l.eq_ignore_ascii_case(lang)) {
+                bail!(
+                    "Unsupported language: {}\nSupported: {}",
+                    lang,
+                    SUPPORTED_LANGUAGES.join(", ")
+                );
+            }
+            // Tokenize "language <Name>" + <asr_text>
+            let mut toks = tok.encode(&format!("language {}", lang))?;
+            toks.push(TOKEN_ASR_TEXT);
+            eprintln!("Language forcing: {} ({} tokens)", lang, toks.len());
+            toks
+        }
+        None => Vec::new(),
+    };
+
     let mut input_ids: Vec<u32> = Vec::new();
     input_ids.extend_from_slice(PROMPT_PREFIX);
     input_ids.extend(std::iter::repeat_n(TOKEN_AUDIO_PAD, n_audio));
     input_ids.extend_from_slice(PROMPT_SUFFIX);
+    input_ids.extend_from_slice(&lang_tokens);
     let prompt_len = input_ids.len();
     eprintln!("Prompt: {} tokens ({} audio pads)", prompt_len, n_audio);
 
@@ -81,7 +157,6 @@ fn main() -> Result<()> {
 
     // Replace audio_pad positions with audio embeddings
     let prefix_len = PROMPT_PREFIX.len();
-    // Slice: positions prefix_len..prefix_len+n_audio get audio embeddings
     let before = input_embeds.narrow(0, 0, prefix_len)?;
     let after = input_embeds.narrow(0, prefix_len + n_audio, prompt_len - prefix_len - n_audio)?;
     input_embeds = Tensor::cat(&[&before, &audio_embeds, &after], 0)?;
@@ -97,10 +172,8 @@ fn main() -> Result<()> {
     let mut token = logits.argmax(1)?.to_vec1::<u32>()?[0];
 
     let mut generated = vec![token];
-    eprintln!("  First token: {}", token);
 
     // ── Autoregressive generation ──
-    eprintln!("Generating...");
     let max_new_tokens = 1024;
     for step in 0..max_new_tokens - 1 {
         if token == TOKEN_ENDOFTEXT || token == TOKEN_IM_END {
@@ -110,9 +183,6 @@ fn main() -> Result<()> {
         let logits = dec.forward_token(token, pos)?;
         token = logits.argmax(1)?.to_vec1::<u32>()?[0];
         generated.push(token);
-        if generated.len() <= 10 {
-            eprintln!("  Token {}: {}", generated.len(), token);
-        }
     }
 
     // Remove trailing EOS
@@ -127,7 +197,6 @@ fn main() -> Result<()> {
     eprintln!("Generated {} tokens", generated.len());
 
     // ── Decode to text ──
-    let tok = tokenizer::Tokenizer::load(&model_dir)?;
     let text = tok.decode(&generated);
     println!("{text}");
 
@@ -226,7 +295,6 @@ fn find_safetensors(model_dir: &PathBuf) -> Result<Vec<PathBuf>> {
         return Ok(vec![single]);
     }
 
-    // Check for sharded safetensors
     let index_path = model_dir.join("model.safetensors.index.json");
     if index_path.exists() {
         let index_str = std::fs::read_to_string(&index_path)?;
