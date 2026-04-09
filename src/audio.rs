@@ -235,7 +235,12 @@ pub fn compute_mel_spectrogram(samples: &[f32]) -> Vec<f32> {
     }
 
     // Dynamic clamping and normalization: max(mel, global_max - 8) then (x + 4) / 4
-    let mmax = mel.iter().copied().fold(f32::NEG_INFINITY, f32::max) - 8.0;
+    let mmax = mel
+        .iter()
+        .copied()
+        .reduce(f32::max)
+        .map(|v| v - 8.0)
+        .unwrap_or(f32::NEG_INFINITY - 8.0);
     for m in mel.iter_mut() {
         *m = m.max(mmax);
         *m = (*m + 4.0) / 4.0;

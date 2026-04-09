@@ -14,6 +14,11 @@ pub const VOCAB_SIZE: usize = 151936;
 const ROPE_THETA: f64 = 1_000_000.0;
 const RMS_EPS: f64 = 1e-6;
 const MAX_SEQ_LEN: usize = 65536; // model config max_position_embeddings (official ASR limit: 1200s / 20min)
+// Candle's Metal SDPA full-kernel path is selected only when q_seq > 8 in
+// candle-nn 0.10.2 `ops.rs`. We only enable causal prefill SDPA once we are
+// firmly on that full-kernel path and avoid relying on the short-sequence
+// vector kernel for masked prefill.
+const METAL_SDPA_MIN_FULL_KERNEL_LEN: usize = 9;
 
 // ── RoPE ────────────────────────────────────────────────────────────────────
 
@@ -306,9 +311,12 @@ impl Decoder {
     /// Forward pass on embeddings. Returns hidden states [B, L, hidden].
     fn forward_hidden(&mut self, h: &Tensor, offset: usize) -> Result<Tensor> {
         let (_, l, _) = h.dims3()?;
-        // Metal SDPA has no CPU implementation and its fast causal path only applies
-        // to offset=0 prefill sequences that are large enough to use the full kernel.
-        let use_causal_sdpa = self.device.is_metal() && offset == 0 && l > 8;
+        // Metal SDPA has no CPU implementation, so all non-Metal runs keep the
+        // existing masked attention path. On Metal we only skip `causal_mask`
+        // when the prefill is long enough to hit Candle's full SDPA kernel.
+        let use_causal_sdpa = self.device.is_metal()
+            && offset == 0
+            && l >= METAL_SDPA_MIN_FULL_KERNEL_LEN;
         let mask = if l == 1 || use_causal_sdpa {
             None
         } else {
