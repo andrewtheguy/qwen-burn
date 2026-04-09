@@ -6,8 +6,11 @@ mod tokenizer;
 use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
+use hf_hub::api::sync::Api;
 use std::io::Read;
 use std::path::PathBuf;
+
+const DEFAULT_MODEL_ID: &str = "Qwen/Qwen3-ASR-0.6B";
 
 // Special token IDs
 const TOKEN_IM_START: u32 = 151644;
@@ -37,9 +40,27 @@ const SUPPORTED_LANGUAGES: &[&str] = &[
     "Filipino", "Persian", "Greek", "Romanian", "Hungarian", "Macedonian",
 ];
 
+fn print_usage() {
+    eprintln!("Usage: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle [options]");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  --model <id>       HuggingFace model ID or local path (default: {})", DEFAULT_MODEL_ID);
+    eprintln!("  --language <lang>  Force output language (e.g. English, Chinese, Japanese)");
+    eprintln!();
+    eprintln!("Supported languages:");
+    eprintln!("  {}", SUPPORTED_LANGUAGES.join(", "));
+    eprintln!();
+    eprintln!("The model is automatically downloaded from HuggingFace on first use.");
+    eprintln!();
+    eprintln!("Examples:");
+    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle");
+    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle -l Japanese");
+    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle --model ./my-local-model");
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let mut model_dir = None;
+    let mut model_id: Option<String> = None;
     let mut language: Option<String> = None;
 
     let mut i = 1;
@@ -52,40 +73,26 @@ fn main() -> Result<()> {
                 }
                 language = Some(args[i].clone());
             }
-            arg if !arg.starts_with('-') => {
-                model_dir = Some(PathBuf::from(arg));
+            "--model" | "-m" => {
+                i += 1;
+                if i >= args.len() {
+                    bail!("--model requires a value");
+                }
+                model_id = Some(args[i].clone());
             }
             "--help" | "-h" => {
-                eprintln!("Usage: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle <model_dir> [--language <lang>]");
-                eprintln!();
-                eprintln!("Arguments:");
-                eprintln!("  <model_dir>        Path to Qwen3-ASR-0.6B model directory");
-                eprintln!("  --language <lang>  Force output language (e.g. English, Chinese, Japanese)");
-                eprintln!();
-                eprintln!("Supported languages:");
-                eprintln!("  {}", SUPPORTED_LANGUAGES.join(", "));
-                eprintln!();
-                eprintln!("Examples:");
-                eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle ./qwen3-asr-0.6b");
-                eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle ./qwen3-asr-0.6b -l Japanese");
+                print_usage();
                 std::process::exit(0);
             }
-            _ => bail!("Unknown argument: {}", args[i]),
+            _ => bail!("Unknown argument: {}. Use --help for usage.", args[i]),
         }
         i += 1;
     }
 
-    let model_dir = model_dir.context(
-        "Usage: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | \
-         qwencandle <model_dir> [--language <lang>]\n\n\
-         Arguments:\n  \
-           <model_dir>        Path to Qwen3-ASR-0.6B model directory\n  \
-           --language <lang>  Force output language (e.g. English, Chinese, Japanese)\n\n\
-         Input: WAV float32 16kHz mono on stdin\n\n\
-         Examples:\n  \
-           ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle ./qwen3-asr-0.6b\n  \
-           ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle ./qwen3-asr-0.6b -l Japanese",
-    )?;
+    let model_id = model_id.unwrap_or_else(|| DEFAULT_MODEL_ID.to_string());
+
+    // ── Resolve model files ──
+    let (safetensors_paths, model_dir) = resolve_model(&model_id)?;
 
     // ── Read WAV from stdin ──
     let samples = read_wav_stdin()?;
@@ -104,10 +111,9 @@ fn main() -> Result<()> {
     let device = Device::Cpu;
     let dtype = DType::F32;
 
-    let safetensors_path = find_safetensors(&model_dir)?;
-    eprintln!("Loading weights from {:?}...", model_dir);
+    eprintln!("Loading weights...");
     let vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(&safetensors_path, dtype, &device)?
+        VarBuilder::from_mmaped_safetensors(&safetensors_paths, dtype, &device)?
     };
 
     // ── Encoder ──
@@ -127,7 +133,6 @@ fn main() -> Result<()> {
     // ── Build prompt ──
     let lang_tokens = match &language {
         Some(lang) => {
-            // Validate language
             if !SUPPORTED_LANGUAGES.iter().any(|&l| l.eq_ignore_ascii_case(lang)) {
                 bail!(
                     "Unsupported language: {}\nSupported: {}",
@@ -135,7 +140,6 @@ fn main() -> Result<()> {
                     SUPPORTED_LANGUAGES.join(", ")
                 );
             }
-            // Tokenize "language <Name>" + <asr_text>
             let mut toks = tok.encode(&format!("language {}", lang))?;
             toks.push(TOKEN_ASR_TEXT);
             eprintln!("Language forcing: {} ({} tokens)", lang, toks.len());
@@ -153,9 +157,8 @@ fn main() -> Result<()> {
     eprintln!("Prompt: {} tokens ({} audio pads)", prompt_len, n_audio);
 
     // ── Embed tokens and replace audio positions ──
-    let mut input_embeds = dec.embed_tokens(&input_ids)?; // [prompt_len, hidden]
+    let mut input_embeds = dec.embed_tokens(&input_ids)?;
 
-    // Replace audio_pad positions with audio embeddings
     let prefix_len = PROMPT_PREFIX.len();
     let before = input_embeds.narrow(0, 0, prefix_len)?;
     let after = input_embeds.narrow(0, prefix_len + n_audio, prompt_len - prefix_len - n_audio)?;
@@ -203,92 +206,39 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Read WAV float32 16kHz mono from stdin. Errors on wrong format.
-fn read_wav_stdin() -> Result<Vec<f32>> {
-    let mut buf = Vec::new();
-    std::io::stdin().read_to_end(&mut buf)?;
-
-    if buf.len() < 44 {
-        bail!("Input too short for WAV");
-    }
-    if &buf[0..4] != b"RIFF" || &buf[8..12] != b"WAVE" {
-        bail!("Not a WAV file");
+/// Resolve model: local directory or HuggingFace hub download.
+/// Returns (safetensors paths, directory containing tokenizer files).
+fn resolve_model(model_id: &str) -> Result<(Vec<PathBuf>, PathBuf)> {
+    let local = PathBuf::from(model_id);
+    if local.is_dir() {
+        let safetensors = find_safetensors(&local)?;
+        return Ok((safetensors, local));
     }
 
-    // Parse fmt chunk
-    let mut pos = 12;
-    let mut fmt_found = false;
-    let mut audio_format: u16 = 0;
-    let mut num_channels: u16 = 0;
-    let mut sample_rate: u32 = 0;
-    let mut bits_per_sample: u16 = 0;
+    // Download from HuggingFace hub
+    eprintln!("Fetching model {} from HuggingFace...", model_id);
+    let api = Api::new()?;
+    let repo = api.model(model_id.to_string());
 
-    loop {
-        if pos + 8 > buf.len() {
-            bail!("Could not find data chunk");
-        }
-        let chunk_id = &buf[pos..pos + 4];
-        let chunk_size = u32::from_le_bytes(buf[pos + 4..pos + 8].try_into()?) as usize;
+    // Required files
+    let safetensors_path = repo.get("model.safetensors")
+        .context("Failed to download model.safetensors")?;
+    let vocab_path = repo.get("vocab.json")
+        .context("Failed to download vocab.json")?;
+    let _merges_path = repo.get("merges.txt")
+        .context("Failed to download merges.txt")?;
 
-        if chunk_id == b"fmt " && chunk_size >= 16 {
-            let d = pos + 8;
-            audio_format = u16::from_le_bytes(buf[d..d + 2].try_into()?);
-            num_channels = u16::from_le_bytes(buf[d + 2..d + 4].try_into()?);
-            sample_rate = u32::from_le_bytes(buf[d + 4..d + 8].try_into()?);
-            bits_per_sample = u16::from_le_bytes(buf[d + 14..d + 16].try_into()?);
-            fmt_found = true;
-        }
+    // Optional but useful
+    let _ = repo.get("tokenizer_config.json");
+    let _ = repo.get("tokenizer.json");
 
-        if chunk_id == b"data" {
-            if !fmt_found {
-                bail!("WAV missing fmt chunk before data");
-            }
-            // audio_format: 1=PCM int, 3=IEEE float
-            if audio_format != 3 || bits_per_sample != 32 {
-                bail!(
-                    "Wrong WAV format: audio_format={} bits={} (expected float32).\n\
-                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | {}",
-                    audio_format, bits_per_sample,
-                    std::env::args().collect::<Vec<_>>().join(" ")
-                );
-            }
-            if num_channels != 1 {
-                bail!(
-                    "Wrong WAV channels: {} (expected mono).\n\
-                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | {}",
-                    num_channels,
-                    std::env::args().collect::<Vec<_>>().join(" ")
-                );
-            }
-            if sample_rate != 16000 {
-                bail!(
-                    "Wrong WAV sample rate: {} (expected 16000).\n\
-                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | {}",
-                    sample_rate,
-                    std::env::args().collect::<Vec<_>>().join(" ")
-                );
-            }
+    // Model dir is the parent of vocab.json
+    let model_dir = vocab_path.parent().unwrap().to_path_buf();
 
-            let data_start = pos + 8;
-            let data_end = std::cmp::min(data_start + chunk_size, buf.len());
-            let data = &buf[data_start..data_end];
-            let n_samples = data.len() / 4;
-            let mut samples = Vec::with_capacity(n_samples);
-            for i in 0..n_samples {
-                let bytes: [u8; 4] = data[i * 4..(i + 1) * 4].try_into()?;
-                samples.push(f32::from_le_bytes(bytes));
-            }
-            return Ok(samples);
-        }
-
-        pos += 8 + chunk_size;
-        if chunk_size % 2 != 0 {
-            pos += 1;
-        }
-    }
+    Ok((vec![safetensors_path], model_dir))
 }
 
-/// Find safetensors file(s) in model directory.
+/// Find safetensors file(s) in a local model directory.
 fn find_safetensors(model_dir: &PathBuf) -> Result<Vec<PathBuf>> {
     let single = model_dir.join("model.safetensors");
     if single.exists() {
@@ -320,4 +270,84 @@ fn find_safetensors(model_dir: &PathBuf) -> Result<Vec<PathBuf>> {
         "No model.safetensors or model.safetensors.index.json found in {:?}",
         model_dir
     );
+}
+
+/// Read WAV float32 16kHz mono from stdin. Errors on wrong format.
+fn read_wav_stdin() -> Result<Vec<f32>> {
+    let mut buf = Vec::new();
+    std::io::stdin().read_to_end(&mut buf)?;
+
+    if buf.len() < 44 {
+        bail!("Input too short for WAV");
+    }
+    if &buf[0..4] != b"RIFF" || &buf[8..12] != b"WAVE" {
+        bail!("Not a WAV file");
+    }
+
+    let mut pos = 12;
+    let mut fmt_found = false;
+    let mut audio_format: u16 = 0;
+    let mut num_channels: u16 = 0;
+    let mut sample_rate: u32 = 0;
+    let mut bits_per_sample: u16 = 0;
+
+    loop {
+        if pos + 8 > buf.len() {
+            bail!("Could not find data chunk");
+        }
+        let chunk_id = &buf[pos..pos + 4];
+        let chunk_size = u32::from_le_bytes(buf[pos + 4..pos + 8].try_into()?) as usize;
+
+        if chunk_id == b"fmt " && chunk_size >= 16 {
+            let d = pos + 8;
+            audio_format = u16::from_le_bytes(buf[d..d + 2].try_into()?);
+            num_channels = u16::from_le_bytes(buf[d + 2..d + 4].try_into()?);
+            sample_rate = u32::from_le_bytes(buf[d + 4..d + 8].try_into()?);
+            bits_per_sample = u16::from_le_bytes(buf[d + 14..d + 16].try_into()?);
+            fmt_found = true;
+        }
+
+        if chunk_id == b"data" {
+            if !fmt_found {
+                bail!("WAV missing fmt chunk before data");
+            }
+            if audio_format != 3 || bits_per_sample != 32 {
+                bail!(
+                    "Wrong WAV format: audio_format={} bits={} (expected float32).\n\
+                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle",
+                    audio_format, bits_per_sample,
+                );
+            }
+            if num_channels != 1 {
+                bail!(
+                    "Wrong WAV channels: {} (expected mono).\n\
+                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle",
+                    num_channels,
+                );
+            }
+            if sample_rate != 16000 {
+                bail!(
+                    "Wrong WAV sample rate: {} (expected 16000).\n\
+                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle",
+                    sample_rate,
+                );
+            }
+
+            let data_start = pos + 8;
+            let data_end = std::cmp::min(data_start + chunk_size, buf.len());
+            let data = &buf[data_start..data_end];
+            let n_samples = data.len() / 4;
+            let mut samples = Vec::with_capacity(n_samples);
+            for i in 0..n_samples {
+                let bytes: [u8; 4] = data[i * 4..(i + 1) * 4].try_into()?;
+                samples.push(f32::from_le_bytes(bytes));
+            }
+            return Ok(samples);
+        }
+
+        pos += 8 + chunk_size;
+        if chunk_size % 2 != 0 {
+            pos += 1;
+        }
+    }
 }
