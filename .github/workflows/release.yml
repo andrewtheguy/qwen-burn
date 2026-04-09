@@ -63,10 +63,8 @@ jobs:
           release_tag = os.environ["RELEASE_TAG"]
           normalized_tag = release_tag[1:] if release_tag.startswith("v") else release_tag
 
-          # Match PEP 440 style versions: 0.1.0, 0.0.1a1, 1.2.3b2, 1.0.0rc1
-          ver_re = r'^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?)"$'
-          cargo_match = re.search(ver_re, cargo, re.MULTILINE)
-          pyproject_match = re.search(ver_re, pyproject, re.MULTILINE)
+          cargo_match = re.search(r'^version = "([^"]+)"$', cargo, re.MULTILINE)
+          pyproject_match = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE)
 
           if cargo_match is None or pyproject_match is None:
             raise SystemExit("Could not determine package versions from Cargo.toml / pyproject.toml")
@@ -74,14 +72,25 @@ jobs:
           cargo_version = cargo_match.group(1)
           pyproject_version = pyproject_match.group(1)
 
-          if cargo_version != pyproject_version:
+          # Normalize semver pre-release to PEP 440 for comparison:
+          # 0.0.1-alpha.1 -> 0.0.1a1, 0.0.1-beta.2 -> 0.0.1b2, 0.0.1-rc.1 -> 0.0.1rc1
+          def semver_to_pep440(v):
+              v = re.sub(r'-alpha\.?(\d+)', r'a\1', v)
+              v = re.sub(r'-beta\.?(\d+)', r'b\1', v)
+              v = re.sub(r'-rc\.?(\d+)', r'rc\1', v)
+              return v
+
+          cargo_normalized = semver_to_pep440(cargo_version)
+
+          if cargo_normalized != pyproject_version:
             raise SystemExit(
-              f"Version mismatch: Cargo.toml={cargo_version}, pyproject.toml={pyproject_version}"
+              f"Version mismatch: Cargo.toml={cargo_version} (normalized: {cargo_normalized}), pyproject.toml={pyproject_version}"
             )
 
-          if cargo_version != normalized_tag:
+          # Tag uses PEP 440 format (e.g. v0.0.1a1)
+          if pyproject_version != normalized_tag:
             raise SystemExit(
-              f"Release tag {release_tag} does not match package version {cargo_version}"
+              f"Release tag {release_tag} does not match pyproject.toml version {pyproject_version}"
             )
           PY
 
