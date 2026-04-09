@@ -70,7 +70,7 @@ impl QwenAsr {
         let language = language.map(|s| s.to_string());
         let context = context.map(|s| s.to_string());
 
-        py.allow_threads(|| {
+        py.detach(|| {
             self.inner
                 .lock()
                 .unwrap()
