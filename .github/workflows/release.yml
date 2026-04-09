@@ -97,7 +97,7 @@ jobs:
             extra-features: ""
           - arch: arm64
             runs-on: macos-latest
-            extra-features: ",metal"
+            extra-features: "metal"
           - arch: amd64
             runs-on: windows-latest
             extra-features: ""
@@ -122,7 +122,7 @@ jobs:
       - name: Build wheel
         env:
           PYO3_PYTHON: python
-        run: maturin build --release --features python${{ matrix.extra-features }} -o dist
+        run: maturin build --release --features python${{ matrix.extra-features && format(',{0}', matrix.extra-features) || '' }} -o dist
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
@@ -169,38 +169,8 @@ jobs:
   deploy-pages:
     if: github.ref_name == 'main'
     needs: create-release
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Generate PEP 503 package index
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          mkdir -p _pages/simple/qwencandle
-
-          {
-            echo '<!DOCTYPE html><html><body>'
-            gh release list --limit 100 --exclude-drafts --json tagName --jq '.[].tagName' | while read -r tag; do
-              gh release view "$tag" --json assets --jq '.assets[] | select(.name | endswith(".whl")) | .name' | while read -r name; do
-                echo "<a href=\"https://github.com/${GH_REPO}/releases/download/${tag}/${name}\">${name}</a><br>"
-              done
-            done
-            echo '</body></html>'
-          } > _pages/simple/qwencandle/index.html
-
-          cat > _pages/simple/index.html <<'HTML'
-          <!DOCTYPE html><html><body>
-          <a href="qwencandle/">qwencandle</a>
-          </body></html>
-          HTML
-
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: '_pages'
-      - id: deployment
-        uses: actions/deploy-pages@v4
+    uses: ./.github/workflows/deploy-pages.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
