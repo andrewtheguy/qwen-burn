@@ -154,13 +154,20 @@ jobs:
             exit 1
           fi
 
+          prerelease_flag=""
+          if [ "$GITHUB_REF_NAME" != "main" ]; then
+            prerelease_flag="--prerelease"
+          fi
+
           gh release create "$RELEASE_TAG" \
             --title "$RELEASE_TAG" \
             --generate-notes \
             --target "${GITHUB_SHA}" \
+            $prerelease_flag \
             "${assets[@]}"
 
   deploy-pages:
+    if: github.ref_name == 'main'
     needs: create-release
     environment:
       name: github-pages
