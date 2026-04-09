@@ -1,5 +1,5 @@
 /// Qwen3 LLM Decoder for ASR.
-/// GQA with Q/K RMSNorm, NeoX RoPE, KV cache, SwiGLU MLP, tied embeddings.
+/// GQA with Q/K RMSNorm, NeoX RoPE, KV cache, SwiGLU Mlp, tied embeddings.
 use candle_core::{DType, Device, Module, Result, Tensor};
 use candle_nn::{
     kv_cache::ConcatKvCache, linear_no_bias, Embedding, Linear, RmsNorm, VarBuilder,
@@ -156,15 +156,15 @@ impl Attention {
     }
 }
 
-// ── MLP ─────────────────────────────────────────────────────────────────────
+// ── Mlp ─────────────────────────────────────────────────────────────────────
 
-struct MLP {
+struct Mlp {
     gate_proj: Linear,
     up_proj: Linear,
     down_proj: Linear,
 }
 
-impl MLP {
+impl Mlp {
     fn load(vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             gate_proj: linear_no_bias(HIDDEN_SIZE, INTERMEDIATE, vb.pp("gate_proj"))?,
@@ -174,7 +174,7 @@ impl MLP {
     }
 }
 
-impl Module for MLP {
+impl Module for Mlp {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let gate = self.gate_proj.forward(x)?.silu()?;
         let up = self.up_proj.forward(x)?;
@@ -186,7 +186,7 @@ impl Module for MLP {
 
 struct DecoderLayer {
     self_attn: Attention,
-    mlp: MLP,
+    mlp: Mlp,
     input_layernorm: RmsNorm,
     post_attention_layernorm: RmsNorm,
 }
@@ -195,7 +195,7 @@ impl DecoderLayer {
     fn load(vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             self_attn: Attention::load(vb.pp("self_attn"))?,
-            mlp: MLP::load(vb.pp("mlp"))?,
+            mlp: Mlp::load(vb.pp("mlp"))?,
             input_layernorm: candle_nn::rms_norm(HIDDEN_SIZE, RMS_EPS, vb.pp("input_layernorm"))?,
             post_attention_layernorm: candle_nn::rms_norm(
                 HIDDEN_SIZE,

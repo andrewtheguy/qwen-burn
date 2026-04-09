@@ -71,7 +71,7 @@ fn dft(inp: &[f32]) -> Vec<f32> {
 fn hertz_to_mel(freq: f32) -> f32 {
     const MIN_LOG_HERTZ: f32 = 1000.0;
     const MIN_LOG_MEL: f32 = 15.0;
-    const LOGSTEP: f32 = 27.0 / 1.8562979903656774; // 27 / ln(6.4)
+    const LOGSTEP: f32 = 27.0 / 1.856_298; // 27 / ln(6.4)
     if freq >= MIN_LOG_HERTZ {
         MIN_LOG_MEL + (freq / MIN_LOG_HERTZ).ln() * LOGSTEP
     } else {
@@ -82,7 +82,7 @@ fn hertz_to_mel(freq: f32) -> f32 {
 fn mel_to_hertz(mel: f32) -> f32 {
     const MIN_LOG_HERTZ: f32 = 1000.0;
     const MIN_LOG_MEL: f32 = 15.0;
-    const LOGSTEP: f32 = 1.8562979903656774 / 27.0; // ln(6.4) / 27
+    const LOGSTEP: f32 = 1.856_298 / 27.0; // ln(6.4) / 27
     if mel >= MIN_LOG_MEL {
         MIN_LOG_HERTZ * ((mel - MIN_LOG_MEL) * LOGSTEP).exp()
     } else {
@@ -149,8 +149,8 @@ fn log_mel_spectrogram_worker(
         for j in 0..copy_len {
             fft_in[j] = hann[j] * samples[offset + j];
         }
-        for j in copy_len..N_FFT {
-            fft_in[j] = 0.0;
+        for v in fft_in.iter_mut().take(N_FFT).skip(copy_len) {
+            *v = 0.0;
         }
 
         // FFT

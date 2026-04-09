@@ -185,7 +185,7 @@ fn read_wav_stdin() -> Result<Vec<f32>> {
         }
 
         pos += 8 + chunk_size;
-        if chunk_size % 2 != 0 {
+        if !chunk_size.is_multiple_of(2) {
             pos += 1;
         }
     }
