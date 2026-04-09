@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "qwencandle"
-version = "0.0.1a2"
+version = "0.0.1a3"
 description = "Qwen3-ASR-0.6B speech-to-text inference via Candle"
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.26"]
@@ -12,3 +12,12 @@ dependencies = ["numpy>=1.26"]
 [tool.maturin]
 features = ["python"]
 bindings = "pyo3"
+
+[dependency-groups]
+dev = ["ruff", "basedpyright"]
+
+[tool.ruff]
+extend-exclude = ["tmp"]
+
+[tool.basedpyright]
+exclude = ["tmp", "target", ".venv"]
