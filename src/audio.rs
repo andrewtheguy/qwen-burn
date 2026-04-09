@@ -1,6 +1,6 @@
 /// Mel spectrogram computation for Qwen3-ASR.
 /// FFT adapted from candle whisper/audio.rs. Slaney mel filterbank for 128 bins.
-use std::sync::Arc;
+use std::sync::OnceLock;
 use std::thread;
 
 const SAMPLE_RATE: usize = 16000;
@@ -128,20 +128,19 @@ pub fn compute_mel_filters() -> Vec<f32> {
 // ── STFT + mel spectrogram ──────────────────────────────────────────────────
 
 fn log_mel_spectrogram_worker(
-    ith: usize,
+    start_frame: usize,
+    end_frame: usize,
     hann: &[f32],
     samples: &[f32],
     filters: &[f32],
-    n_len: usize,
-    n_threads: usize,
 ) -> Vec<f32> {
     let n_fft_half = 1 + N_FFT / 2; // 201
     let mut fft_in = vec![0.0f32; N_FFT];
-    let mut mel = vec![0.0f32; n_len * NUM_MEL_BINS];
+    let local_frames = end_frame - start_frame;
+    let mut mel = vec![0.0f32; local_frames * NUM_MEL_BINS];
     let n_samples = samples.len();
-    let end = std::cmp::min(n_samples / HOP_LENGTH + 1, n_len);
 
-    for i in (ith..end).step_by(n_threads) {
+    for (local_frame, i) in (start_frame..end_frame).enumerate() {
         let offset = i * HOP_LENGTH;
 
         // Apply Hann window
@@ -168,53 +167,70 @@ fn log_mel_spectrogram_worker(
             for f in 0..n_fft_half {
                 sum += fft_out[f] * filters[f * NUM_MEL_BINS + m];
             }
-            mel[m * n_len + i] = sum.max(1e-10).log10();
+            mel[m * local_frames + local_frame] = sum.max(1e-10).log10();
         }
     }
     mel
 }
 
+fn cached_mel_filters() -> &'static [f32] {
+    static MEL_FILTERS: OnceLock<Vec<f32>> = OnceLock::new();
+    MEL_FILTERS.get_or_init(compute_mel_filters)
+}
+
+fn cached_hann_window() -> &'static [f32] {
+    static HANN_WINDOW: OnceLock<Vec<f32>> = OnceLock::new();
+    HANN_WINDOW.get_or_init(|| {
+        (0..N_FFT)
+            .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / N_FFT as f32).cos()))
+            .collect()
+    })
+}
+
 /// Compute mel spectrogram from raw PCM f32 samples (16kHz mono).
 /// Returns flat [NUM_MEL_BINS, n_frames] in row-major order.
 pub fn compute_mel_spectrogram(samples: &[f32]) -> Vec<f32> {
-    let filters = compute_mel_filters();
     let n_len = samples.len() / HOP_LENGTH;
+    if n_len == 0 {
+        return Vec::new();
+    }
+
+    let filters = cached_mel_filters();
+    let hann = cached_hann_window();
     // No padding — just compute exact frames
 
-    // Each thread computes a strided subset of STFT frames (thread i handles frames i, i+n, i+2n, ...).
-    // Results are summed across threads since each thread writes to non-overlapping frame indices.
-    let n_threads = std::thread::available_parallelism().map_or(2, |n| n.get());
+    let n_threads = std::thread::available_parallelism()
+        .map_or(2, |n| n.get())
+        .min(n_len);
+    let frames_per_thread = (n_len + n_threads - 1) / n_threads;
 
-    let hann: Vec<f32> = (0..N_FFT)
-        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / N_FFT as f32).cos()))
-        .collect();
-
-    let hann = Arc::new(hann);
-    let samples_arc = Arc::new(samples.to_vec());
-    let filters = Arc::new(filters);
-
-    let all_outputs = thread::scope(|s| {
-        (0..n_threads)
-            .map(|tid| {
-                let hann = Arc::clone(&hann);
-                let samples = Arc::clone(&samples_arc);
-                let filters = Arc::clone(&filters);
-                s.spawn(move || {
-                    log_mel_spectrogram_worker(tid, &hann, &samples, &filters, n_len, n_threads)
-                })
-            })
-            .collect::<Vec<_>>()
+    let outputs = thread::scope(|s| {
+        let mut handles = Vec::new();
+        for start_frame in (0..n_len).step_by(frames_per_thread) {
+            let end_frame = std::cmp::min(start_frame + frames_per_thread, n_len);
+            handles.push(s.spawn(move || {
+                (
+                    start_frame,
+                    end_frame,
+                    log_mel_spectrogram_worker(start_frame, end_frame, hann, samples, filters),
+                )
+            }));
+        }
+        handles
             .into_iter()
             .map(|h| h.join().expect("mel thread panicked"))
             .collect::<Vec<_>>()
     });
 
-    // Sum thread outputs
-    let l = all_outputs[0].len();
-    let mut mel = vec![0.0f32; l];
-    for out in &all_outputs {
-        for (i, &v) in out.iter().enumerate() {
-            mel[i] += v;
+    let mut mel = vec![0.0f32; n_len * NUM_MEL_BINS];
+    for (start_frame, end_frame, out) in outputs {
+        let local_frames = end_frame - start_frame;
+        for m in 0..NUM_MEL_BINS {
+            let src_start = m * local_frames;
+            let src_end = src_start + local_frames;
+            let dst_start = m * n_len + start_frame;
+            let dst_end = dst_start + local_frames;
+            mel[dst_start..dst_end].copy_from_slice(&out[src_start..src_end]);
         }
     }
 
@@ -222,8 +238,9 @@ pub fn compute_mel_spectrogram(samples: &[f32]) -> Vec<f32> {
     let mmax = mel
         .iter()
         .copied()
-        .fold(f32::NEG_INFINITY, f32::max)
-        - 8.0;
+        .reduce(f32::max)
+        .map(|v| v - 8.0)
+        .unwrap_or(f32::NEG_INFINITY - 8.0);
     for m in mel.iter_mut() {
         *m = m.max(mmax);
         *m = (*m + 4.0) / 4.0;
