@@ -25,12 +25,16 @@ jobs:
         include:
           - arch: amd64
             runs-on: ubuntu-latest
+            extra-features: ""
           - arch: arm64
             runs-on: ubuntu-24.04-arm
+            extra-features: ""
           - arch: arm64
             runs-on: macos-latest
+            extra-features: ",metal"
           - arch: amd64
             runs-on: windows-latest
+            extra-features: ""
 
     runs-on: ${{ matrix.runs-on }}
 
@@ -108,7 +112,7 @@ jobs:
       - name: Build wheel
         env:
           PYO3_PYTHON: python
-        run: maturin build --release --features python -o dist
+        run: maturin build --release --features python${{ matrix.extra-features }} -o dist
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
