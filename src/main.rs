@@ -39,7 +39,7 @@ fn parse_device(s: &str) -> Result<Device> {
         "cuda" => {
             #[cfg(feature = "cuda")]
             {
-                Ok(Device::cuda_if_available(0)?)
+                Ok(Device::new_cuda(0)?)
             }
             #[cfg(not(feature = "cuda"))]
             {
