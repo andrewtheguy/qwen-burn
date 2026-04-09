@@ -1,0 +1,53 @@
+name: Deploy Pages
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy-pages:
+    if: github.ref_name == 'main'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate PEP 503 package index
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p _pages/simple/qwencandle
+
+          {
+            echo '<!DOCTYPE html><html><body>'
+            gh release list --limit 100 --exclude-drafts --json tagName --jq '.[].tagName' | while read -r tag; do
+              gh release view "$tag" --json assets --jq '.assets[] | select(.name | endswith(".whl")) | .name' | while read -r name; do
+                echo "<a href=\"https://github.com/${GH_REPO}/releases/download/${tag}/${name}\">${name}</a><br>"
+              done
+            done
+            echo '</body></html>'
+          } > _pages/simple/qwencandle/index.html
+
+          cat > _pages/simple/index.html <<'HTML'
+          <!DOCTYPE html><html><body>
+          <a href="qwencandle/">qwencandle</a>
+          </body></html>
+          HTML
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: '_pages'
+      - id: deployment
+        uses: actions/deploy-pages@v4
