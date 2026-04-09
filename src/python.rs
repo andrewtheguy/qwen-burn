@@ -6,32 +6,9 @@ use std::sync::Mutex;
 fn parse_device(device: &str) -> PyResult<Device> {
     match device.to_lowercase().as_str() {
         "cpu" => Ok(Device::Cpu),
-        "metal" | "mps" => {
-            #[cfg(feature = "metal")]
-            {
-                Ok(Device::metal(0))
-            }
-            #[cfg(not(feature = "metal"))]
-            {
-                Err(PyRuntimeError::new_err(
-                    "Metal support not compiled. Rebuild with: maturin develop --features python,metal",
-                ))
-            }
-        }
-        "cuda" => {
-            #[cfg(feature = "cuda")]
-            {
-                Ok(Device::cuda(0))
-            }
-            #[cfg(not(feature = "cuda"))]
-            {
-                Err(PyRuntimeError::new_err(
-                    "CUDA support not compiled. Rebuild with: maturin develop --features python,cuda",
-                ))
-            }
-        }
+        "metal" | "mps" | "gpu" => Ok(Device::DiscreteGpu(0)),
         _ => Err(PyRuntimeError::new_err(format!(
-            "Unknown device: {}. Supported: cpu, metal, cuda",
+            "Unknown device: {}. Supported: cpu, metal/gpu",
             device
         ))),
     }

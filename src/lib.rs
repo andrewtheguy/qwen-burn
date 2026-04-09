@@ -9,12 +9,12 @@ mod python;
 
 use anyhow::{bail, Context, Result};
 use burn::tensor::{Int, Tensor};
-use burn_candle::{Candle, CandleDevice};
+use burn_wgpu::{Wgpu, WgpuDevice};
 use hf_hub::api::sync::Api;
 use std::path::PathBuf;
 
-pub type B = Candle<f32, i64>;
-pub type Device = CandleDevice;
+pub type B = Wgpu<f32, i32>;
+pub type Device = WgpuDevice;
 
 pub const DEFAULT_MODEL_ID: &str = "Qwen/Qwen3-ASR-0.6B";
 
@@ -49,7 +49,7 @@ pub struct QwenAsr {
 impl QwenAsr {
     /// Load model on CPU from a HuggingFace model ID or local directory path.
     pub fn load(model_id: &str) -> Result<Self> {
-        Self::load_on(model_id, &Device::Cpu)
+        Self::load_on(model_id, &Default::default())
     }
 
     /// Load model on a specific device from a HuggingFace model ID or local directory path.

@@ -26,27 +26,8 @@ fn print_usage() {
 fn parse_device(s: &str) -> Result<Device> {
     match s.to_lowercase().as_str() {
         "cpu" => Ok(Device::Cpu),
-        "metal" | "mps" => {
-            #[cfg(feature = "metal")]
-            {
-                Ok(Device::metal(0))
-            }
-            #[cfg(not(feature = "metal"))]
-            {
-                bail!("Metal support not compiled. Rebuild with: cargo build --release --features metal")
-            }
-        }
-        "cuda" => {
-            #[cfg(feature = "cuda")]
-            {
-                Ok(Device::cuda(0))
-            }
-            #[cfg(not(feature = "cuda"))]
-            {
-                bail!("CUDA support not compiled. Rebuild with: cargo build --release --features cuda")
-            }
-        }
-        _ => bail!("Unknown device: {}. Supported: cpu, metal, cuda", s),
+        "metal" | "mps" | "gpu" => Ok(Device::DiscreteGpu(0)),
+        _ => bail!("Unknown device: {}. Supported: cpu, metal/gpu", s),
     }
 }
 
@@ -92,7 +73,7 @@ fn main() -> Result<()> {
     let model_id = model_id.unwrap_or_else(|| DEFAULT_MODEL_ID.to_string());
     let device = match &device_str {
         Some(d) => parse_device(d)?,
-        None => Device::Cpu,
+        None => Default::default(),
     };
 
     let samples = read_wav_stdin()?;

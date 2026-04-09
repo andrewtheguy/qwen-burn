@@ -1,6 +1,6 @@
 /// Qwen3 LLM Decoder for ASR.
 /// GQA with Q/K RMSNorm, RoPE, KV cache, SwiGLU Mlp, tied embeddings.
-use burn::nn::{Embedding, Linear, RmsNorm, RotaryEncoding, RotaryEncodingConfig};
+use burn::nn::{Embedding, Linear, RmsNorm};
 use burn::tensor::activation::{silu, softmax};
 use burn::tensor::{Int, Tensor, TensorData};
 
@@ -21,6 +21,96 @@ pub const VOCAB_SIZE: usize = 151936;
 const ROPE_THETA: f64 = 1_000_000.0;
 const RMS_EPS: f64 = 1e-6;
 const MAX_SEQ_LEN: usize = 65536;
+
+// ── RoPE (matches candle's interleaved rope implementation) ────────────────
+
+struct RotaryEmbedding {
+    sin: Tensor<B, 2>, // [MAX_SEQ_LEN, HEAD_DIM/2]
+    cos: Tensor<B, 2>,
+}
+
+impl RotaryEmbedding {
+    fn new(device: &Device) -> Self {
+        let half = HEAD_DIM / 2;
+        let inv_freq: Vec<f32> = (0..HEAD_DIM)
+            .step_by(2)
+            .map(|i| 1.0 / ROPE_THETA.powf(i as f64 / HEAD_DIM as f64) as f32)
+            .collect();
+
+        // freqs[t, i] = t * inv_freq[i]
+        let mut sin_data = vec![0.0f32; MAX_SEQ_LEN * half];
+        let mut cos_data = vec![0.0f32; MAX_SEQ_LEN * half];
+        for t in 0..MAX_SEQ_LEN {
+            for i in 0..half {
+                let angle = t as f32 * inv_freq[i];
+                sin_data[t * half + i] = angle.sin();
+                cos_data[t * half + i] = angle.cos();
+            }
+        }
+
+        let sin = Tensor::<B, 2>::from_data(
+            TensorData::new(sin_data, [MAX_SEQ_LEN, half]),
+            device,
+        );
+        let cos = Tensor::<B, 2>::from_data(
+            TensorData::new(cos_data, [MAX_SEQ_LEN, half]),
+            device,
+        );
+        Self { sin, cos }
+    }
+
+    /// Apply RoPE to q and k of shape [B, H, L, D] using interleaved pairs.
+    fn apply(
+        &self,
+        q: Tensor<B, 4>,
+        k: Tensor<B, 4>,
+        offset: usize,
+    ) -> (Tensor<B, 4>, Tensor<B, 4>) {
+        let [b, h_q, l, d] = q.dims();
+        let h_k = k.dims()[1];
+        let half = d / 2;
+
+        // Get sin/cos for this position range: [L, half]
+        let cos = self.cos.clone().narrow(0, offset, l);
+        let sin = self.sin.clone().narrow(0, offset, l);
+
+        // Reshape sin/cos to [1, 1, L, half] for broadcasting
+        let cos = cos.reshape([1, 1, l, half]);
+        let sin = sin.reshape([1, 1, l, half]);
+
+        let q_out = self.rope_tensor(q, &cos, &sin, b, h_q, l, half);
+        let k_out = self.rope_tensor(k, &cos, &sin, b, h_k, l, half);
+        (q_out, k_out)
+    }
+
+    /// Apply rotation to a single tensor [B, H, L, D]
+    fn rope_tensor(
+        &self,
+        x: Tensor<B, 4>,
+        cos: &Tensor<B, 4>,
+        sin: &Tensor<B, 4>,
+        b: usize,
+        h: usize,
+        l: usize,
+        half: usize,
+    ) -> Tensor<B, 4> {
+        // Split x into pairs: reshape [B, H, L, D] → [B, H, L, D/2, 2]
+        let x = x.reshape([b, h, l, half, 2]);
+        let x0 = x.clone().narrow(4, 0, 1); // [B, H, L, half, 1]
+        let x1 = x.narrow(4, 1, 1);         // [B, H, L, half, 1]
+
+        // cos/sin are [1, 1, L, half], expand to [1, 1, L, half, 1]
+        let cos = cos.clone().unsqueeze::<5>();
+        let sin = sin.clone().unsqueeze::<5>();
+
+        // out[..., 0] = x0 * cos - x1 * sin
+        // out[..., 1] = x1 * cos + x0 * sin
+        let out0 = x0.clone() * cos.clone() - x1.clone() * sin.clone();
+        let out1 = x1 * cos + x0 * sin;
+
+        Tensor::cat(vec![out0, out1], 4).reshape([b, h, l, half * 2])
+    }
+}
 
 // ── KV Cache ───────────────────────────────────────────────────────────────
 
@@ -87,7 +177,7 @@ impl Attention {
         &mut self,
         x: &Tensor<B, 3>,
         mask: Option<&Tensor<B, 4>>,
-        rotary: &RotaryEncoding<B>,
+        rotary: &RotaryEmbedding,
         offset: usize,
     ) -> Tensor<B, 3> {
         let [b, l, _] = x.dims();
@@ -116,8 +206,7 @@ impl Attention {
         let k: Tensor<B, 4> = k_flat.reshape([b, N_KV_HEADS, l, HEAD_DIM]);
 
         // RoPE
-        let q = rotary.apply(q, offset);
-        let k = rotary.apply(k, offset);
+        let (q, k) = rotary.apply(q, k, offset);
 
         // KV cache
         let (k, v) = self.kv_cache.append(k, v);
@@ -215,7 +304,7 @@ impl DecoderLayer {
         &mut self,
         x: &Tensor<B, 3>,
         mask: Option<&Tensor<B, 4>>,
-        rotary: &RotaryEncoding<B>,
+        rotary: &RotaryEmbedding,
         offset: usize,
     ) -> Tensor<B, 3> {
         let h = self.input_layernorm.forward(x.clone());
@@ -238,7 +327,7 @@ pub struct Decoder {
     layers: Vec<DecoderLayer>,
     norm: RmsNorm<B>,
     lm_head_weight: Tensor<B, 2>, // tied with embed_tokens
-    rotary: RotaryEncoding<B>,
+    rotary: RotaryEmbedding,
     device: Device,
 }
 
@@ -261,9 +350,7 @@ impl Decoder {
         // Tied embeddings: lm_head shares weights with embed_tokens
         let lm_head_weight = embed_tokens.weight.val();
 
-        let rotary = RotaryEncodingConfig::new(MAX_SEQ_LEN, HEAD_DIM)
-            .with_theta(ROPE_THETA as f32)
-            .init::<B>(device);
+        let rotary = RotaryEmbedding::new(device);
 
         Ok(Self {
             embed_tokens,
