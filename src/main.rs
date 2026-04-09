@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use qwencandle::{QwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
+use qwencandle::{Device, QwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
 use std::io::Read;
 
 fn print_usage() {
@@ -7,6 +7,7 @@ fn print_usage() {
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --model <id>       HuggingFace model ID or local path (default: {DEFAULT_MODEL_ID})");
+    eprintln!("  --device <dev>     Device: cpu, metal (default: cpu)");
     eprintln!("  --language <lang>  Force output language (e.g. English, Chinese, Japanese)");
     eprintln!("  --context <text>   Condition on previous text (system prompt for consistency)");
     eprintln!();
@@ -17,9 +18,36 @@ fn print_usage() {
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle");
+    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle --device metal");
     eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle -l Japanese");
     eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle --context \"Previous sentence.\"");
-    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle --model ./my-local-model");
+}
+
+fn parse_device(s: &str) -> Result<Device> {
+    match s.to_lowercase().as_str() {
+        "cpu" => Ok(Device::Cpu),
+        "metal" | "mps" => {
+            #[cfg(feature = "metal")]
+            {
+                Ok(Device::new_metal(0)?)
+            }
+            #[cfg(not(feature = "metal"))]
+            {
+                bail!("Metal support not compiled. Rebuild with: cargo build --release --features metal")
+            }
+        }
+        "cuda" => {
+            #[cfg(feature = "cuda")]
+            {
+                Ok(Device::cuda_if_available(0)?)
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                bail!("CUDA support not compiled. Rebuild with: cargo build --release --features cuda")
+            }
+        }
+        _ => bail!("Unknown device: {}. Supported: cpu, metal, cuda", s),
+    }
 }
 
 fn main() -> Result<()> {
@@ -27,6 +55,7 @@ fn main() -> Result<()> {
     let mut model_id: Option<String> = None;
     let mut language: Option<String> = None;
     let mut context: Option<String> = None;
+    let mut device_str: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -46,6 +75,11 @@ fn main() -> Result<()> {
                 if i >= args.len() { bail!("--context requires a value"); }
                 context = Some(args[i].clone());
             }
+            "--device" | "-d" => {
+                i += 1;
+                if i >= args.len() { bail!("--device requires a value"); }
+                device_str = Some(args[i].clone());
+            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -56,12 +90,16 @@ fn main() -> Result<()> {
     }
 
     let model_id = model_id.unwrap_or_else(|| DEFAULT_MODEL_ID.to_string());
+    let device = match &device_str {
+        Some(d) => parse_device(d)?,
+        None => Device::Cpu,
+    };
 
     let samples = read_wav_stdin()?;
     eprintln!("Audio: {} samples ({:.1}s)", samples.len(), samples.len() as f32 / 16000.0);
 
-    eprintln!("Loading model...");
-    let mut model = QwenAsr::load(&model_id)?;
+    eprintln!("Loading model on {:?}...", device);
+    let mut model = QwenAsr::load_on(&model_id, &device)?;
 
     let text = model.transcribe(
         &samples,

@@ -4,10 +4,12 @@ mod encoder;
 pub mod tokenizer;
 
 use anyhow::{bail, Context, Result};
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Tensor};
 use candle_nn::VarBuilder;
 use hf_hub::api::sync::Api;
 use std::path::PathBuf;
+
+pub use candle_core::Device;
 
 pub const DEFAULT_MODEL_ID: &str = "Qwen/Qwen3-ASR-0.6B";
 
@@ -40,20 +42,23 @@ pub struct QwenAsr {
 }
 
 impl QwenAsr {
-    /// Load model from a HuggingFace model ID or local directory path.
+    /// Load model on CPU from a HuggingFace model ID or local directory path.
     pub fn load(model_id: &str) -> Result<Self> {
-        let (safetensors_paths, model_dir) = resolve_model(model_id)?;
+        Self::load_on(model_id, &Device::Cpu)
+    }
 
-        let device = Device::Cpu;
+    /// Load model on a specific device from a HuggingFace model ID or local directory path.
+    pub fn load_on(model_id: &str, device: &Device) -> Result<Self> {
+        let (safetensors_paths, model_dir) = resolve_model(model_id)?;
         let dtype = DType::F32;
 
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&safetensors_paths, dtype, &device)?
+            VarBuilder::from_mmaped_safetensors(&safetensors_paths, dtype, device)?
         };
 
-        let encoder = encoder::AudioEncoder::load(vb.pp("thinker.audio_tower"), &device)?;
+        let encoder = encoder::AudioEncoder::load(vb.pp("thinker.audio_tower"), device)?;
         let tokenizer = tokenizer::Tokenizer::load(&model_dir)?;
-        let decoder = decoder::Decoder::load(vb.pp("thinker"), &device)?;
+        let decoder = decoder::Decoder::load(vb.pp("thinker"), device)?;
 
         Ok(Self { encoder, decoder, tokenizer })
     }

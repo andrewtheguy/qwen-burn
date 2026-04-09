@@ -40,22 +40,25 @@ impl EncoderAttention {
         let k = self.k_proj.forward(x)?;
         let v = self.v_proj.forward(x)?;
 
-        // Reshape to [1, n_heads, seq, head_dim]
+        // Reshape to [1, n_heads, seq, head_dim], ensure contiguous for Metal
         let q = q
             .reshape((seq_len, N_HEADS, HEAD_DIM))?
             .transpose(0, 1)?
-            .unsqueeze(0)?;
+            .unsqueeze(0)?
+            .contiguous()?;
         let k = k
             .reshape((seq_len, N_HEADS, HEAD_DIM))?
             .transpose(0, 1)?
-            .unsqueeze(0)?;
+            .unsqueeze(0)?
+            .contiguous()?;
         let v = v
             .reshape((seq_len, N_HEADS, HEAD_DIM))?
             .transpose(0, 1)?
-            .unsqueeze(0)?;
+            .unsqueeze(0)?
+            .contiguous()?;
 
         let scale = 1.0 / (HEAD_DIM as f64).sqrt();
-        let scores = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
+        let scores = (q.matmul(&k.transpose(2, 3)?.contiguous()?)? * scale)?;
         let probs = candle_nn::ops::softmax_last_dim(&scores)?;
         let ctx = probs.matmul(&v)?; // [1, n_heads, seq, head_dim]
 

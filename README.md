@@ -8,6 +8,12 @@ Qwen3-ASR-0.6B speech-to-text inference in Rust, built on [Candle](https://githu
 cargo build --release
 ```
 
+With Metal GPU acceleration (macOS):
+
+```
+cargo build --release --features metal
+```
+
 ## Usage
 
 Input is WAV float32 16kHz mono on stdin. Use ffmpeg to convert any audio format:
@@ -22,9 +28,18 @@ The model is automatically downloaded from HuggingFace on first use and cached i
 
 ```
 --model <id>       HuggingFace model ID or local path (default: Qwen/Qwen3-ASR-0.6B)
+--device <dev>     Device: cpu, metal (default: cpu)
 --language <lang>  Force output language (e.g. English, Chinese, Japanese)
---context <text>   Condition on previous text (inserted as system prompt)
+--context <text>   Condition on previous text (system prompt for consistency)
 --help             Show help
+```
+
+### Metal GPU
+
+On macOS, build with `--features metal` and use `--device metal` for GPU acceleration:
+
+```
+ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | ./target/release/qwencandle --device metal
 ```
 
 ### Language forcing
@@ -52,4 +67,15 @@ To use a locally downloaded model instead of auto-downloading:
 ```
 huggingface-cli download Qwen/Qwen3-ASR-0.6B --local-dir qwen3-asr-0.6b
 ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | ./target/release/qwencandle --model ./qwen3-asr-0.6b
+```
+
+## Library
+
+Use as a Rust library:
+
+```rust
+use qwencandle::{QwenAsr, Device};
+
+let mut model = QwenAsr::load_on("Qwen/Qwen3-ASR-0.6B", &Device::Cpu)?;
+let text = model.transcribe(&samples, Some("English"), None)?;
 ```
