@@ -1,46 +1,12 @@
-mod audio;
-mod decoder;
-mod encoder;
-mod tokenizer;
-
-use anyhow::{bail, Context, Result};
-use candle_core::{DType, Device, Tensor};
-use candle_nn::VarBuilder;
-use hf_hub::api::sync::Api;
+use anyhow::{bail, Result};
+use qwencandle::{QwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
 use std::io::Read;
-use std::path::PathBuf;
-
-const DEFAULT_MODEL_ID: &str = "Qwen/Qwen3-ASR-0.6B";
-
-// Special token IDs
-const TOKEN_IM_START: u32 = 151644;
-const TOKEN_IM_END: u32 = 151645;
-const TOKEN_AUDIO_START: u32 = 151669;
-const TOKEN_AUDIO_END: u32 = 151670;
-const TOKEN_AUDIO_PAD: u32 = 151676;
-const TOKEN_ENDOFTEXT: u32 = 151643;
-const TOKEN_ASR_TEXT: u32 = 151704;
-
-// Prompt suffix (after audio)
-const PROMPT_SUFFIX: &[u32] = &[
-    TOKEN_AUDIO_END, TOKEN_IM_END, 198,
-    TOKEN_IM_START, 77091, 198,
-];
-
-// Supported languages (from config.json support_languages)
-const SUPPORTED_LANGUAGES: &[&str] = &[
-    "Chinese", "English", "Cantonese", "Arabic", "German", "French",
-    "Spanish", "Portuguese", "Indonesian", "Italian", "Korean", "Russian",
-    "Thai", "Vietnamese", "Japanese", "Turkish", "Hindi", "Malay",
-    "Dutch", "Swedish", "Danish", "Finnish", "Polish", "Czech",
-    "Filipino", "Persian", "Greek", "Romanian", "Hungarian", "Macedonian",
-];
 
 fn print_usage() {
     eprintln!("Usage: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle [options]");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --model <id>       HuggingFace model ID or local path (default: {})", DEFAULT_MODEL_ID);
+    eprintln!("  --model <id>       HuggingFace model ID or local path (default: {DEFAULT_MODEL_ID})");
     eprintln!("  --language <lang>  Force output language (e.g. English, Chinese, Japanese)");
     eprintln!("  --context <text>   Condition on previous text (system prompt for consistency)");
     eprintln!();
@@ -52,7 +18,7 @@ fn print_usage() {
     eprintln!("Examples:");
     eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle");
     eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle -l Japanese");
-    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle --context \"Previously the speaker said hello.\"");
+    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle --context \"Previous sentence.\"");
     eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle --model ./my-local-model");
 }
 
@@ -67,23 +33,17 @@ fn main() -> Result<()> {
         match args[i].as_str() {
             "--language" | "-l" => {
                 i += 1;
-                if i >= args.len() {
-                    bail!("--language requires a value");
-                }
+                if i >= args.len() { bail!("--language requires a value"); }
                 language = Some(args[i].clone());
             }
             "--model" | "-m" => {
                 i += 1;
-                if i >= args.len() {
-                    bail!("--model requires a value");
-                }
+                if i >= args.len() { bail!("--model requires a value"); }
                 model_id = Some(args[i].clone());
             }
             "--context" | "-c" => {
                 i += 1;
-                if i >= args.len() {
-                    bail!("--context requires a value");
-                }
+                if i >= args.len() { bail!("--context requires a value"); }
                 context = Some(args[i].clone());
             }
             "--help" | "-h" => {
@@ -97,206 +57,20 @@ fn main() -> Result<()> {
 
     let model_id = model_id.unwrap_or_else(|| DEFAULT_MODEL_ID.to_string());
 
-    // ── Resolve model files ──
-    let (safetensors_paths, model_dir) = resolve_model(&model_id)?;
-
-    // ── Read WAV from stdin ──
     let samples = read_wav_stdin()?;
-    eprintln!(
-        "Audio: {} samples ({:.1}s)",
-        samples.len(),
-        samples.len() as f32 / 16000.0
-    );
+    eprintln!("Audio: {} samples ({:.1}s)", samples.len(), samples.len() as f32 / 16000.0);
 
-    // ── Mel spectrogram ──
-    let n_frames = audio::mel_frames(samples.len());
-    let mel = audio::compute_mel_spectrogram(&samples);
-    eprintln!("Mel spectrogram: [128, {}]", n_frames);
+    eprintln!("Loading model...");
+    let mut model = QwenAsr::load(&model_id)?;
 
-    // ── Load model weights ──
-    let device = Device::Cpu;
-    let dtype = DType::F32;
-
-    eprintln!("Loading weights...");
-    let vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(&safetensors_paths, dtype, &device)?
-    };
-
-    // ── Encoder ──
-    eprintln!("Running encoder...");
-    let enc = encoder::AudioEncoder::load(vb.pp("thinker.audio_tower"), &device)?;
-    let audio_embeds = enc.forward(&mel, n_frames)?;
-    let n_audio = audio_embeds.dim(0)?;
-    eprintln!("Audio embeddings: [{}, {}]", n_audio, audio_embeds.dim(1)?);
-
-    // ── Tokenizer ──
-    let tok = tokenizer::Tokenizer::load(&model_dir)?;
-
-    // ── Decoder ──
-    eprintln!("Loading decoder...");
-    let mut dec = decoder::Decoder::load(vb.pp("thinker"), &device)?;
-
-    // ── Build prompt ──
-    // Prompt: <|im_start|>system\n{context}<|im_end|>\n<|im_start|>user\n<|audio_start|>...audio...<|audio_end|><|im_end|>\n<|im_start|>assistant\n{lang_tokens}
-    let context_tokens = match &context {
-        Some(ctx) => {
-            let toks = tok.encode(ctx)?;
-            eprintln!("Context: {} chars, {} tokens", ctx.len(), toks.len());
-            toks
-        }
-        None => Vec::new(),
-    };
-
-    let lang_tokens = match &language {
-        Some(lang) => {
-            if !SUPPORTED_LANGUAGES.iter().any(|&l| l.eq_ignore_ascii_case(lang)) {
-                bail!(
-                    "Unsupported language: {}\nSupported: {}",
-                    lang,
-                    SUPPORTED_LANGUAGES.join(", ")
-                );
-            }
-            let mut toks = tok.encode(&format!("language {}", lang))?;
-            toks.push(TOKEN_ASR_TEXT);
-            eprintln!("Language forcing: {} ({} tokens)", lang, toks.len());
-            toks
-        }
-        None => Vec::new(),
-    };
-
-    // Build input_ids with optional context in system prompt:
-    // <|im_start|>system\n [context_tokens] <|im_end|>\n<|im_start|>user\n<|audio_start|> [audio_pads] <|audio_end|><|im_end|>\n<|im_start|>assistant\n [lang_tokens]
-    let mut input_ids: Vec<u32> = Vec::new();
-    input_ids.push(TOKEN_IM_START);
-    input_ids.push(8948); // "system"
-    input_ids.push(198);  // "\n"
-    input_ids.extend_from_slice(&context_tokens);
-    input_ids.push(TOKEN_IM_END);
-    input_ids.push(198);  // "\n"
-    input_ids.push(TOKEN_IM_START);
-    input_ids.push(872);  // "user"
-    input_ids.push(198);  // "\n"
-    input_ids.push(TOKEN_AUDIO_START);
-    let prefix_len = input_ids.len();
-    input_ids.extend(std::iter::repeat_n(TOKEN_AUDIO_PAD, n_audio));
-    input_ids.extend_from_slice(PROMPT_SUFFIX);
-    input_ids.extend_from_slice(&lang_tokens);
-    let prompt_len = input_ids.len();
-    eprintln!("Prompt: {} tokens ({} audio pads)", prompt_len, n_audio);
-
-    // ── Embed tokens and replace audio positions ──
-    let mut input_embeds = dec.embed_tokens(&input_ids)?;
-
-    let before = input_embeds.narrow(0, 0, prefix_len)?;
-    let after = input_embeds.narrow(0, prefix_len + n_audio, prompt_len - prefix_len - n_audio)?;
-    input_embeds = Tensor::cat(&[&before, &audio_embeds, &after], 0)?;
-
-    // ── Prefill (all but last token) ──
-    eprintln!("Prefilling {} tokens...", prompt_len - 1);
-    let prefill_embeds = input_embeds.narrow(0, 0, prompt_len - 1)?;
-    dec.forward_embed(&prefill_embeds, 0)?;
-
-    // ── Generate first token from last prefill position ──
-    let last_embed = input_embeds.narrow(0, prompt_len - 1, 1)?;
-    let logits = dec.forward_embed(&last_embed, prompt_len - 1)?;
-    let mut token = logits.argmax(1)?.to_vec1::<u32>()?[0];
-
-    let mut generated = vec![token];
-
-    // ── Autoregressive generation ──
-    let max_new_tokens = 1024;
-    for step in 0..max_new_tokens - 1 {
-        if token == TOKEN_ENDOFTEXT || token == TOKEN_IM_END {
-            break;
-        }
-        let pos = prompt_len + step;
-        let logits = dec.forward_token(token, pos)?;
-        token = logits.argmax(1)?.to_vec1::<u32>()?[0];
-        generated.push(token);
-    }
-
-    // Remove trailing EOS
-    while let Some(&last) = generated.last() {
-        if last == TOKEN_ENDOFTEXT || last == TOKEN_IM_END {
-            generated.pop();
-        } else {
-            break;
-        }
-    }
-
-    eprintln!("Generated {} tokens", generated.len());
-
-    // ── Decode to text ──
-    let text = tok.decode(&generated);
+    let text = model.transcribe(
+        &samples,
+        language.as_deref(),
+        context.as_deref(),
+    )?;
     println!("{text}");
 
     Ok(())
-}
-
-/// Resolve model: local directory or HuggingFace hub download.
-/// Returns (safetensors paths, directory containing tokenizer files).
-fn resolve_model(model_id: &str) -> Result<(Vec<PathBuf>, PathBuf)> {
-    let local = PathBuf::from(model_id);
-    if local.is_dir() {
-        let safetensors = find_safetensors(&local)?;
-        return Ok((safetensors, local));
-    }
-
-    // Download from HuggingFace hub
-    eprintln!("Fetching model {} from HuggingFace...", model_id);
-    let api = Api::new()?;
-    let repo = api.model(model_id.to_string());
-
-    // Required files
-    let safetensors_path = repo.get("model.safetensors")
-        .context("Failed to download model.safetensors")?;
-    let vocab_path = repo.get("vocab.json")
-        .context("Failed to download vocab.json")?;
-    let _merges_path = repo.get("merges.txt")
-        .context("Failed to download merges.txt")?;
-
-    // Optional but useful
-    let _ = repo.get("tokenizer_config.json");
-    let _ = repo.get("tokenizer.json");
-
-    // Model dir is the parent of vocab.json
-    let model_dir = vocab_path.parent().unwrap().to_path_buf();
-
-    Ok((vec![safetensors_path], model_dir))
-}
-
-/// Find safetensors file(s) in a local model directory.
-fn find_safetensors(model_dir: &PathBuf) -> Result<Vec<PathBuf>> {
-    let single = model_dir.join("model.safetensors");
-    if single.exists() {
-        return Ok(vec![single]);
-    }
-
-    let index_path = model_dir.join("model.safetensors.index.json");
-    if index_path.exists() {
-        let index_str = std::fs::read_to_string(&index_path)?;
-        let index: serde_json::Value = serde_json::from_str(&index_str)?;
-        let weight_map = index
-            .get("weight_map")
-            .context("Missing weight_map in index")?
-            .as_object()
-            .context("weight_map not object")?;
-
-        let mut shards: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for shard in weight_map.values() {
-            if let Some(s) = shard.as_str() {
-                shards.insert(s.to_string());
-            }
-        }
-
-        let paths: Vec<PathBuf> = shards.iter().map(|s| model_dir.join(s)).collect();
-        return Ok(paths);
-    }
-
-    bail!(
-        "No model.safetensors or model.safetensors.index.json found in {:?}",
-        model_dir
-    );
 }
 
 /// Read WAV float32 16kHz mono from stdin. Errors on wrong format.
