@@ -1,9 +1,7 @@
 /// Qwen3 LLM Decoder for ASR.
 /// GQA with Q/K RMSNorm, NeoX RoPE, KV cache, SwiGLU Mlp, tied embeddings.
 use candle_core::{DType, Device, Module, Result, Tensor};
-use candle_nn::{
-    kv_cache::ConcatKvCache, linear_no_bias, Embedding, Linear, RmsNorm, VarBuilder,
-};
+use candle_nn::{kv_cache::ConcatKvCache, linear_no_bias, Embedding, Linear, RmsNorm, VarBuilder};
 
 // 0.6B decoder config
 const HIDDEN_SIZE: usize = 1024;
@@ -85,6 +83,7 @@ impl Attention {
         mask: Option<&Tensor>,
         rotary: &RotaryEmbedding,
         offset: usize,
+        use_causal_sdpa: bool,
     ) -> Result<Tensor> {
         let (b, l, _) = x.dims3()?;
 
@@ -93,15 +92,9 @@ impl Attention {
         let v = self.v_proj.forward(x)?;
 
         // Reshape: [B, L, H, D] → [B, H, L, D]
-        let q = q
-            .reshape((b, l, N_HEADS, HEAD_DIM))?
-            .transpose(1, 2)?;
-        let k = k
-            .reshape((b, l, N_KV_HEADS, HEAD_DIM))?
-            .transpose(1, 2)?;
-        let v = v
-            .reshape((b, l, N_KV_HEADS, HEAD_DIM))?
-            .transpose(1, 2)?;
+        let q = q.reshape((b, l, N_HEADS, HEAD_DIM))?.transpose(1, 2)?;
+        let k = k.reshape((b, l, N_KV_HEADS, HEAD_DIM))?.transpose(1, 2)?;
+        let v = v.reshape((b, l, N_KV_HEADS, HEAD_DIM))?.transpose(1, 2)?;
 
         // Per-head RMSNorm on Q and K
         let q_flat = q.flatten(0, 2)?; // [B*H*L, D]
@@ -116,6 +109,24 @@ impl Attention {
 
         // KV cache
         let (k, v) = self.kv_cache.append(&k, &v)?;
+
+        if x.device().is_metal() && (use_causal_sdpa || (mask.is_none() && l == 1)) {
+            let scale = 1.0 / (HEAD_DIM as f64).sqrt();
+            let ctx = candle_nn::ops::sdpa(
+                &q.contiguous()?,
+                &k.contiguous()?,
+                &v.contiguous()?,
+                None,
+                use_causal_sdpa,
+                scale as f32,
+                1.0,
+            )?;
+
+            return ctx
+                .transpose(1, 2)?
+                .reshape((b, l, N_HEADS * HEAD_DIM))?
+                .apply(&self.o_proj);
+        }
 
         // GQA: repeat KV heads
         let n_groups = N_HEADS / N_KV_HEADS;
@@ -211,9 +222,12 @@ impl DecoderLayer {
         mask: Option<&Tensor>,
         rotary: &RotaryEmbedding,
         offset: usize,
+        use_causal_sdpa: bool,
     ) -> Result<Tensor> {
         let h = self.input_layernorm.forward(x)?;
-        let h = self.self_attn.forward(&h, mask, rotary, offset)?;
+        let h = self
+            .self_attn
+            .forward(&h, mask, rotary, offset, use_causal_sdpa)?;
         let x = (x + h)?;
         let h = self.post_attention_layernorm.forward(&x)?;
         let h = h.apply(&self.mlp)?;
@@ -240,7 +254,8 @@ pub struct Decoder {
 impl Decoder {
     pub fn load(vb: VarBuilder, device: &Device) -> Result<Self> {
         let vb_model = vb.pp("model");
-        let embed_tokens = candle_nn::embedding(VOCAB_SIZE, HIDDEN_SIZE, vb_model.pp("embed_tokens"))?;
+        let embed_tokens =
+            candle_nn::embedding(VOCAB_SIZE, HIDDEN_SIZE, vb_model.pp("embed_tokens"))?;
 
         let mut layers = Vec::with_capacity(N_LAYERS);
         let vb_l = vb_model.pp("layers");
@@ -282,23 +297,19 @@ impl Decoder {
         let minf = f32::NEG_INFINITY;
         let mask: Vec<f32> = (0..tgt)
             .flat_map(|i| {
-                (0..(tgt + offset)).map(move |j| {
-                    if j <= i + offset {
-                        0.0
-                    } else {
-                        minf
-                    }
-                })
+                (0..(tgt + offset)).map(move |j| if j <= i + offset { 0.0 } else { minf })
             })
             .collect();
-        Tensor::from_slice(&mask, (1, 1, tgt, tgt + offset), &self.device)?
-            .to_dtype(self.dtype)
+        Tensor::from_slice(&mask, (1, 1, tgt, tgt + offset), &self.device)?.to_dtype(self.dtype)
     }
 
     /// Forward pass on embeddings. Returns hidden states [B, L, hidden].
     fn forward_hidden(&mut self, h: &Tensor, offset: usize) -> Result<Tensor> {
         let (_, l, _) = h.dims3()?;
-        let mask = if l == 1 {
+        // Metal SDPA has no CPU implementation and its fast causal path only applies
+        // to offset=0 prefill sequences that are large enough to use the full kernel.
+        let use_causal_sdpa = self.device.is_metal() && offset == 0 && l > 8;
+        let mask = if l == 1 || use_causal_sdpa {
             None
         } else {
             Some(self.causal_mask(l, offset)?)
@@ -306,7 +317,7 @@ impl Decoder {
 
         let mut h = h.clone();
         for layer in &mut self.layers {
-            h = layer.forward(&h, mask.as_ref(), &self.rotary, offset)?;
+            h = layer.forward(&h, mask.as_ref(), &self.rotary, offset, use_causal_sdpa)?;
         }
         self.norm.forward(&h)
     }
@@ -319,8 +330,7 @@ impl Decoder {
         // Take last position
         let seq_len = h.dim(1)?;
         let last = h.narrow(1, seq_len - 1, 1)?.squeeze(1)?; // [1, hidden]
-        last.to_dtype(DType::F32)?
-            .matmul(&self.lm_head_weight.t()?)
+        last.to_dtype(DType::F32)?.matmul(&self.lm_head_weight.t()?)
     }
 
     /// Forward pass for a single token during autoregressive generation.
@@ -330,8 +340,7 @@ impl Decoder {
         let embed_3d = embed.unsqueeze(0)?; // [1, 1, hidden]
         let h = self.forward_hidden(&embed_3d, offset)?;
         let h = h.squeeze(1)?; // [1, hidden]
-        h.to_dtype(DType::F32)?
-            .matmul(&self.lm_head_weight.t()?)
+        h.to_dtype(DType::F32)?.matmul(&self.lm_head_weight.t()?)
     }
 
     pub fn clear_kv_cache(&mut self) {
