@@ -13,7 +13,8 @@ const INTERMEDIATE: usize = 3072;
 pub const VOCAB_SIZE: usize = 151936;
 const ROPE_THETA: f64 = 1_000_000.0;
 const RMS_EPS: f64 = 1e-6;
-const MAX_SEQ_LEN: usize = 65536; // model config max_position_embeddings (official ASR limit: 1200s / 20min)
+// Model config max_position_embeddings (official ASR limit: 1200s / 20min).
+const MAX_SEQ_LEN: usize = 65536;
 // Candle's Metal SDPA full-kernel path is selected only when q_seq > 8 in
 // candle-nn 0.10.2 `ops.rs`. We only enable causal prefill SDPA once we are
 // firmly on that full-kernel path and avoid relying on the short-sequence
@@ -299,13 +300,14 @@ impl Decoder {
     }
 
     fn causal_mask(&self, tgt: usize, offset: usize) -> Result<Tensor> {
-        let minf = f32::NEG_INFINITY;
-        let mask: Vec<f32> = (0..tgt)
-            .flat_map(|i| {
-                (0..(tgt + offset)).map(move |j| if j <= i + offset { 0.0 } else { minf })
-            })
-            .collect();
-        Tensor::from_slice(&mask, (1, 1, tgt, tgt + offset), &self.device)?.to_dtype(self.dtype)
+        let width = tgt + offset;
+        let allowed = Tensor::tril2(width, DType::U8, &self.device)?.narrow(0, offset, tgt)?;
+        let zeros = Tensor::zeros((tgt, width), self.dtype, &self.device)?;
+        let neg_inf =
+            Tensor::full(f32::NEG_INFINITY, (tgt, width), &self.device)?.to_dtype(self.dtype)?;
+        allowed
+            .where_cond(&zeros, &neg_inf)?
+            .reshape((1, 1, tgt, width))
     }
 
     /// Forward pass on embeddings. Returns hidden states [B, L, hidden].
@@ -314,9 +316,8 @@ impl Decoder {
         // Metal SDPA has no CPU implementation, so all non-Metal runs keep the
         // existing masked attention path. On Metal we only skip `causal_mask`
         // when the prefill is long enough to hit Candle's full SDPA kernel.
-        let use_causal_sdpa = self.device.is_metal()
-            && offset == 0
-            && l >= METAL_SDPA_MIN_FULL_KERNEL_LEN;
+        let use_causal_sdpa =
+            self.device.is_metal() && offset == 0 && l >= METAL_SDPA_MIN_FULL_KERNEL_LEN;
         let mask = if l == 1 || use_causal_sdpa {
             None
         } else {
