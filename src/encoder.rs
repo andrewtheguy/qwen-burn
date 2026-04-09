@@ -1,6 +1,6 @@
 /// Qwen3-ASR Audio Encoder.
 /// Conv2D stem (per-chunk) → sinusoidal PE → windowed Transformer → projector.
-use candle_core::{Device, Module, Result, Tensor};
+use candle_core::{DType, Device, Module, Result, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, LayerNorm, LayerNormConfig, Linear, VarBuilder};
 
 // 0.6B encoder config
@@ -88,7 +88,11 @@ impl EncoderLayer {
         };
         Ok(Self {
             self_attn: EncoderAttention::load(vb.pp("self_attn"))?,
-            self_attn_layer_norm: candle_nn::layer_norm(D_MODEL, ln_cfg, vb.pp("self_attn_layer_norm"))?,
+            self_attn_layer_norm: candle_nn::layer_norm(
+                D_MODEL,
+                ln_cfg,
+                vb.pp("self_attn_layer_norm"),
+            )?,
             fc1: candle_nn::linear(D_MODEL, FFN_DIM, vb.pp("fc1"))?,
             fc2: candle_nn::linear(FFN_DIM, D_MODEL, vb.pp("fc2"))?,
             final_layer_norm: candle_nn::layer_norm(D_MODEL, ln_cfg, vb.pp("final_layer_norm"))?,
@@ -128,6 +132,7 @@ pub struct AudioEncoder {
     conv2d2: Conv2d,
     conv2d3: Conv2d,
     conv_out: Tensor, // weight only, no bias — [d_model, 7680]
+    positional_embedding: Tensor,
     layers: Vec<EncoderLayer>,
     ln_post: LayerNorm,
     proj1: Linear,
@@ -157,7 +162,10 @@ impl AudioEncoder {
             conv_cfg,
             vb.pp("conv2d3"),
         )?;
-        let conv_out = vb.get((D_MODEL, DOWNSAMPLE_HIDDEN * NUM_MEL_BINS / 8), "conv_out.weight")?;
+        let conv_out = vb.get(
+            (D_MODEL, DOWNSAMPLE_HIDDEN * NUM_MEL_BINS / 8),
+            "conv_out.weight",
+        )?;
 
         let mut layers = Vec::with_capacity(N_LAYERS);
         let vb_l = vb.pp("layers");
@@ -173,12 +181,15 @@ impl AudioEncoder {
         let ln_post = candle_nn::layer_norm(D_MODEL, ln_cfg, vb.pp("ln_post"))?;
         let proj1 = candle_nn::linear(D_MODEL, D_MODEL, vb.pp("proj1"))?;
         let proj2 = candle_nn::linear(D_MODEL, OUTPUT_DIM, vb.pp("proj2"))?;
+        let positional_embedding =
+            sinusoidal_position_embedding(feat_extract_output_length(CHUNK_SIZE), D_MODEL, device)?;
 
         Ok(Self {
             conv2d1,
             conv2d2,
             conv2d3,
             conv_out,
+            positional_embedding,
             layers,
             ln_post,
             proj1,
@@ -189,69 +200,72 @@ impl AudioEncoder {
 
     /// mel: flat [NUM_MEL_BINS, n_frames] row-major f32 slice
     pub fn forward(&self, mel: &[f32], n_frames: usize) -> Result<Tensor> {
-        // ── Conv2D stem (per-chunk) ──
-        let mut chunk_outputs = Vec::new();
-
-        let mut start = 0;
-        while start < n_frames {
-            let end = std::cmp::min(start + CHUNK_SIZE, n_frames);
-            let chunk_len = end - start;
-
-            // Extract chunk: [mel_bins, chunk_len] → Tensor [1, 1, mel_bins, chunk_len]
-            let mut chunk_data = vec![0.0f32; NUM_MEL_BINS * chunk_len];
-            for m in 0..NUM_MEL_BINS {
-                for t in 0..chunk_len {
-                    chunk_data[m * chunk_len + t] = mel[m * n_frames + start + t];
-                }
-            }
-            let x = Tensor::from_vec(chunk_data, (1, 1, NUM_MEL_BINS, chunk_len), &self.device)?;
-
-            // 3 x Conv2D + GELU
-            let x = self.conv2d1.forward(&x)?.gelu()?;
-            let x = self.conv2d2.forward(&x)?.gelu()?;
-            let x = self.conv2d3.forward(&x)?.gelu()?;
-
-            // x: [1, 480, freq, time] → [time, 480*freq]
-            let (_, c, f, t) = x.dims4()?;
-            let x = x
-                .permute((0, 3, 1, 2))?
-                .contiguous()?
-                .reshape((t, c * f))?;
-            chunk_outputs.push(x);
-
-            start += CHUNK_SIZE;
+        if n_frames == 0 {
+            return Tensor::zeros((0, OUTPUT_DIM), DType::F32, &self.device);
         }
 
-        // Concatenate chunks → [total_tokens, 480*freq]
-        let x = Tensor::cat(&chunk_outputs, 0)?;
+        let num_full_chunks = n_frames / CHUNK_SIZE;
+        let tail_frames = n_frames % CHUNK_SIZE;
+        let num_chunks = num_full_chunks + usize::from(tail_frames > 0);
+
+        let mut chunk_valid_tokens = Vec::with_capacity(num_chunks);
+        let mut chunk_data = vec![0.0f32; num_chunks * NUM_MEL_BINS * CHUNK_SIZE];
+
+        for chunk_idx in 0..num_chunks {
+            let start = chunk_idx * CHUNK_SIZE;
+            let chunk_len = std::cmp::min(CHUNK_SIZE, n_frames - start);
+            chunk_valid_tokens.push(feat_extract_output_length(chunk_len));
+
+            let chunk_offset = chunk_idx * NUM_MEL_BINS * CHUNK_SIZE;
+            for m in 0..NUM_MEL_BINS {
+                let src_start = m * n_frames + start;
+                let src_end = src_start + chunk_len;
+                let dst_start = chunk_offset + m * CHUNK_SIZE;
+                let dst_end = dst_start + chunk_len;
+                chunk_data[dst_start..dst_end].copy_from_slice(&mel[src_start..src_end]);
+            }
+        }
+
+        // ── Conv2D stem (batched across chunks) ──
+        let x = Tensor::from_vec(
+            chunk_data,
+            (num_chunks, 1, NUM_MEL_BINS, CHUNK_SIZE),
+            &self.device,
+        )?;
+        let x = self.conv2d1.forward(&x)?.gelu()?;
+        let x = self.conv2d2.forward(&x)?.gelu()?;
+        let x = self.conv2d3.forward(&x)?.gelu()?;
+
+        // x: [chunks, 480, freq, time] → [chunks, time, 480*freq]
+        let (_, c, f, t) = x.dims4()?;
+        let x = x
+            .permute((0, 3, 1, 2))?
+            .contiguous()?
+            .reshape((num_chunks, t, c * f))?;
+
+        // Candle's matmul fast path here expects 2D x 2D, so flatten the batch first.
+        let x = x.reshape((num_chunks * t, c * f))?;
+        let x = x.matmul(&self.conv_out.t()?)?;
+        let x = x.reshape((num_chunks, t, D_MODEL))?;
+        let pos_emb = self.positional_embedding.narrow(0, 0, t)?.unsqueeze(0)?;
+        let x = x.broadcast_add(&pos_emb)?;
+
+        // Drop padded tail tokens and flatten back to a single sequence.
+        let mut chunk_outputs = Vec::with_capacity(num_chunks);
+        for (chunk_idx, &valid_tokens) in chunk_valid_tokens.iter().enumerate() {
+            let chunk = x.narrow(0, chunk_idx, 1)?.squeeze(0)?;
+            chunk_outputs.push(chunk.narrow(0, 0, valid_tokens)?);
+        }
+
+        let x = if chunk_outputs.len() == 1 {
+            chunk_outputs.pop().unwrap()
+        } else {
+            Tensor::cat(&chunk_outputs, 0)?
+        };
         let total_tokens = x.dim(0)?;
 
-        // Linear projection: [total_tokens, 7680] → [total_tokens, d_model]
-        let x = x.matmul(&self.conv_out.t()?)?;
-
-        // ── Per-chunk sinusoidal position embeddings ──
-        let tokens_per_chunk = chunk_outputs[0].dim(0)?;
-        let pos_emb = sinusoidal_position_embedding(tokens_per_chunk, D_MODEL, &self.device)?;
-
-        let mut x = x;
-        let mut offset = 0;
-        for co in &chunk_outputs {
-            let clen = co.dim(0)?;
-            let pe_slice = pos_emb.narrow(0, 0, clen)?;
-            let x_slice = x.narrow(0, offset, clen)?;
-            let updated = (&x_slice + &pe_slice)?;
-            x = Tensor::cat(
-                &[
-                    &x.narrow(0, 0, offset)?,
-                    &updated,
-                    &x.narrow(0, offset + clen, total_tokens - offset - clen)?,
-                ],
-                0,
-            )?;
-            offset += clen;
-        }
-
         // ── Compute cu_seqlens for windowed attention ──
+        let tokens_per_chunk = self.positional_embedding.dim(0)?;
         let tokens_per_infer_window = tokens_per_chunk * (N_WINDOW_INFER / CHUNK_SIZE);
         let mut cu_seqlens = vec![0usize];
         let mut pos = 0;
@@ -272,6 +286,11 @@ impl AudioEncoder {
         let h = self.proj1.forward(&h)?.gelu()?;
         self.proj2.forward(&h)
     }
+}
+
+fn feat_extract_output_length(input_frames: usize) -> usize {
+    let after_conv = |len: usize| -> usize { (len - 1) / 2 + 1 };
+    after_conv(after_conv(after_conv(input_frames)))
 }
 
 /// Sinusoidal position embedding: [length, channels]
