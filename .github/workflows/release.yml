@@ -92,9 +92,9 @@ jobs:
           - arch: arm64
             runs-on: macos-latest
             extra-features: "metal"
-          - arch: amd64
-            runs-on: windows-latest
-            extra-features: ""
+          # - arch: amd64
+          #   runs-on: windows-latest
+          #   extra-features: ""
 
     runs-on: ${{ matrix.runs-on }}
 
