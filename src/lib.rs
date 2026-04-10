@@ -142,9 +142,7 @@ impl<B: Backend> QwenAsr<B> {
         // First token
         let last_embed = input_embeds.narrow(0, prompt_len - 1, 1);
         let logits = self.decoder.forward_embed(&last_embed, prompt_len - 1);
-        let tok_tensor: Tensor<B, 2, Int> = logits.argmax(1);
-        let tok_data: Vec<i32> = tok_tensor.into_data().to_vec().unwrap();
-        let mut token = tok_data[0] as u32;
+        let mut token = argmax_token(logits)?;
         let mut generated = vec![token];
 
         // Autoregressive decode
@@ -155,9 +153,7 @@ impl<B: Backend> QwenAsr<B> {
             }
             let pos = prompt_len + step;
             let logits = self.decoder.forward_token(token, pos);
-            let tok_tensor: Tensor<B, 2, Int> = logits.argmax(1);
-            let tok_data: Vec<i32> = tok_tensor.into_data().to_vec().unwrap();
-            token = tok_data[0] as u32;
+            token = argmax_token(logits)?;
             generated.push(token);
         }
 
@@ -172,6 +168,17 @@ impl<B: Backend> QwenAsr<B> {
 
         Ok(self.tokenizer.decode(&generated))
     }
+}
+
+/// Extract the argmax token ID from a [1, vocab] logits tensor.
+fn argmax_token<B: Backend>(logits: Tensor<B, 2>) -> Result<u32> {
+    let tok_tensor: Tensor<B, 2, Int> = logits.argmax(1);
+    let tok_data: Vec<i32> = tok_tensor
+        .into_data()
+        .to_vec()
+        .context("Failed to extract token from argmax")?;
+    let id = *tok_data.first().context("Empty argmax result")?;
+    u32::try_from(id).context("Negative token ID from argmax")
 }
 
 /// Resolve model: local directory or HuggingFace hub download.

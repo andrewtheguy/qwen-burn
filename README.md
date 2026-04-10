@@ -80,11 +80,14 @@ ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | ./target/releas
 ## Rust library
 
 ```rust
+use burn_wgpu::Wgpu;
 use qwencandle::QwenAsr;
 
-let mut model = QwenAsr::load("Qwen/Qwen3-ASR-0.6B")?;
+let mut model = QwenAsr::<Wgpu>::load("Qwen/Qwen3-ASR-0.6B")?;
 let text = model.transcribe(&samples, Some("English"), None)?;
 ```
+
+`QwenAsr` is generic over burn's `Backend` trait. Swap `Wgpu` for `burn_cpu::Cpu` to run on CPU instead.
 
 ## Python bindings
 

@@ -239,29 +239,17 @@ impl<B: Backend> AudioEncoder<B> {
         let x = x.matmul(self.conv_out.clone().transpose());
 
         // ── Per-chunk sinusoidal position embeddings ──
+        // Each chunk gets the same PE (truncated to chunk length). Build the full
+        // PE tensor by tiling per-chunk PE across all chunks.
         let tokens_per_chunk = chunk_outputs[0].dims()[0];
         let pos_emb = sinusoidal_position_embedding::<B>(tokens_per_chunk, D_MODEL, &self.device);
 
-        let mut x = x;
-        let mut offset = 0;
-        for co in &chunk_outputs {
-            let clen = co.dims()[0];
-            let pe_slice = pos_emb.clone().narrow(0, 0, clen);
-            let x_slice = x.clone().narrow(0, offset, clen);
-            let updated = x_slice + pe_slice;
-
-            let mut parts = Vec::new();
-            if offset > 0 {
-                parts.push(x.clone().narrow(0, 0, offset));
-            }
-            parts.push(updated);
-            let tail = total_tokens - offset - clen;
-            if tail > 0 {
-                parts.push(x.clone().narrow(0, offset + clen, tail));
-            }
-            x = Tensor::cat(parts, 0);
-            offset += clen;
-        }
+        let pe_chunks: Vec<Tensor<B, 2>> = chunk_outputs
+            .iter()
+            .map(|co| pos_emb.clone().narrow(0, 0, co.dims()[0]))
+            .collect();
+        let full_pe = Tensor::cat(pe_chunks, 0); // [total_tokens, D_MODEL]
+        let x = x + full_pe;
 
         // ── Compute cu_seqlens for windowed attention ──
         let tokens_per_infer_window = tokens_per_chunk * (N_WINDOW_INFER / CHUNK_SIZE);
