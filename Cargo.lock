@@ -4711,7 +4711,7 @@ dependencies = [
 
 [[package]]
 name = "qwencandle"
-version = "0.0.4-beta2"
+version = "0.0.4-beta3"
 dependencies = [
  "anyhow",
  "burn",
