@@ -1,25 +1,26 @@
 [package]
-name = "qwencandle"
-version = "0.0.3"
+name = "qwen-burn"
+version = "0.0.1-alpha1"
 edition = "2021"
 
 [lib]
-name = "qwencandle"
+name = "qwen_burn"
 
 [dependencies]
-candle-core = { git = "https://github.com/huggingface/candle.git", rev = "f7b22980ea77daef9772e1d1e133d51c2baf04b7" }
-candle-nn = { git = "https://github.com/huggingface/candle.git", rev = "f7b22980ea77daef9772e1d1e133d51c2baf04b7" }
+burn = "0.20.1"
+burn-ndarray = "0.20.1"
+safetensors = "0.7.0"
+memmap2 = "0.9"
+half = { version = "2", features = ["num-traits"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokenizers = "0.22"
+# Avoid tokenizers' esaxx_fast C++ build, which links the static CRT on Windows.
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 hf-hub = "0.5"
 pyo3 = { version = "0.27", optional = true, features = ["abi3-py39", "extension-module"] }
 numpy = { version = "0.27", optional = true }
 
 [features]
 default = []
-metal = ["candle-core/metal", "candle-nn/metal"]
-cuda = ["candle-core/cuda", "candle-nn/cuda"]
-accelerate = ["candle-nn/accelerate"]
 python = ["dep:pyo3", "dep:numpy"]

@@ -202,7 +202,7 @@ pub fn compute_mel_spectrogram(samples: &[f32]) -> Vec<f32> {
     let n_threads = std::thread::available_parallelism()
         .map_or(2, |n| n.get())
         .min(n_len);
-    let frames_per_thread = (n_len + n_threads - 1) / n_threads;
+    let frames_per_thread = n_len.div_ceil(n_threads);
 
     let outputs = thread::scope(|s| {
         let mut handles = Vec::new();

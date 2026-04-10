@@ -1,18 +1,19 @@
+#![recursion_limit = "256"]
+
 pub mod audio;
 mod decoder;
 mod encoder;
 pub mod tokenizer;
+pub mod weights;
 
 #[cfg(feature = "python")]
 mod python;
 
 use anyhow::{bail, Context, Result};
-use candle_core::{DType, Tensor};
-use candle_nn::VarBuilder;
+use burn::tensor::backend::Backend;
+use burn::tensor::{Int, Tensor};
 use hf_hub::api::sync::Api;
 use std::path::PathBuf;
-
-pub use candle_core::Device;
 
 pub const DEFAULT_MODEL_ID: &str = "Qwen/Qwen3-ASR-0.6B";
 
@@ -38,30 +39,28 @@ pub const SUPPORTED_LANGUAGES: &[&str] = &[
     "Filipino", "Persian", "Greek", "Romanian", "Hungarian", "Macedonian",
 ];
 
-pub struct QwenAsr {
-    encoder: encoder::AudioEncoder,
-    decoder: decoder::Decoder,
+pub struct QwenAsr<B: Backend> {
+    encoder: encoder::AudioEncoder<B>,
+    decoder: decoder::Decoder<B>,
     tokenizer: tokenizer::Tokenizer,
 }
 
-impl QwenAsr {
-    /// Load model on CPU from a HuggingFace model ID or local directory path.
+impl<B: Backend> QwenAsr<B> {
+    /// Load model on the default device (auto-detect).
     pub fn load(model_id: &str) -> Result<Self> {
-        Self::load_on(model_id, &Device::Cpu)
+        Self::load_on(model_id, &Default::default())
     }
 
-    /// Load model on a specific device from a HuggingFace model ID or local directory path.
-    pub fn load_on(model_id: &str, device: &Device) -> Result<Self> {
+    /// Load model on a specific device.
+    pub fn load_on(model_id: &str, device: &B::Device) -> Result<Self> {
         let (safetensors_paths, model_dir) = resolve_model(model_id)?;
-        let dtype = DType::F32;
 
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&safetensors_paths, dtype, device)?
-        };
+        let store = weights::TensorStore::open(&safetensors_paths)?;
+        let tensors = store.tensors()?;
 
-        let encoder = encoder::AudioEncoder::load(vb.pp("thinker.audio_tower"), device)?;
+        let encoder = encoder::AudioEncoder::<B>::load(&tensors, "thinker.audio_tower", device)?;
         let tokenizer = tokenizer::Tokenizer::load(&model_dir)?;
-        let decoder = decoder::Decoder::load(vb.pp("thinker"), device)?;
+        let decoder = decoder::Decoder::<B>::load(&tensors, "thinker", device)?;
 
         Ok(Self { encoder, decoder, tokenizer })
     }
@@ -89,8 +88,8 @@ impl QwenAsr {
         let mel = audio::compute_mel_spectrogram(samples);
 
         // Encoder
-        let audio_embeds = self.encoder.forward(&mel, n_frames)?;
-        let n_audio = audio_embeds.dim(0)?;
+        let audio_embeds = self.encoder.forward(&mel, n_frames);
+        let n_audio = audio_embeds.dims()[0];
 
         // Tokenize context and language
         let context_tokens = match context {
@@ -107,8 +106,7 @@ impl QwenAsr {
             None => Vec::new(),
         };
 
-        // Build input_ids:
-        // <|im_start|>system\n [context] <|im_end|>\n<|im_start|>user\n<|audio_start|> [audio_pads] <|audio_end|><|im_end|>\n<|im_start|>assistant\n [lang_tokens]
+        // Build input_ids
         let mut input_ids: Vec<u32> = Vec::new();
         input_ids.push(TOKEN_IM_START);
         input_ids.push(8948); // "system"
@@ -127,22 +125,24 @@ impl QwenAsr {
         let prompt_len = input_ids.len();
 
         // Embed tokens and replace audio positions
-        let input_embeds = self.decoder.embed_tokens(&input_ids)?;
-        let before = input_embeds.narrow(0, 0, prefix_len)?;
-        let after = input_embeds.narrow(0, prefix_len + n_audio, prompt_len - prefix_len - n_audio)?;
-        let input_embeds = Tensor::cat(&[&before, &audio_embeds, &after], 0)?;
+        let input_embeds = self.decoder.embed_tokens_ids(&input_ids);
+        let before = input_embeds.clone().narrow(0, 0, prefix_len);
+        let after = input_embeds
+            .clone()
+            .narrow(0, prefix_len + n_audio, prompt_len - prefix_len - n_audio);
+        let input_embeds = Tensor::cat(vec![before, audio_embeds, after], 0);
 
         // Reset KV cache for fresh transcription
         self.decoder.clear_kv_cache();
 
         // Prefill
-        let prefill_embeds = input_embeds.narrow(0, 0, prompt_len - 1)?;
-        self.decoder.forward_embed(&prefill_embeds, 0)?;
+        let prefill_embeds = input_embeds.clone().narrow(0, 0, prompt_len - 1);
+        self.decoder.forward_embed(&prefill_embeds, 0);
 
         // First token
-        let last_embed = input_embeds.narrow(0, prompt_len - 1, 1)?;
-        let logits = self.decoder.forward_embed(&last_embed, prompt_len - 1)?;
-        let mut token = logits.argmax(1)?.to_vec1::<u32>()?[0];
+        let last_embed = input_embeds.narrow(0, prompt_len - 1, 1);
+        let logits = self.decoder.forward_embed(&last_embed, prompt_len - 1);
+        let mut token = argmax_token(logits)?;
         let mut generated = vec![token];
 
         // Autoregressive decode
@@ -152,8 +152,8 @@ impl QwenAsr {
                 break;
             }
             let pos = prompt_len + step;
-            let logits = self.decoder.forward_token(token, pos)?;
-            token = logits.argmax(1)?.to_vec1::<u32>()?[0];
+            let logits = self.decoder.forward_token(token, pos);
+            token = argmax_token(logits)?;
             generated.push(token);
         }
 
@@ -168,6 +168,18 @@ impl QwenAsr {
 
         Ok(self.tokenizer.decode(&generated))
     }
+}
+
+/// Extract the argmax token ID from a [1, vocab] logits tensor.
+fn argmax_token<B: Backend>(logits: Tensor<B, 2>) -> Result<u32> {
+    let tok_tensor: Tensor<B, 2, Int> = logits.argmax(1);
+    let tok_data: Vec<i32> = tok_tensor
+        .into_data()
+        .convert::<i32>()
+        .to_vec()
+        .context("Failed to extract token from argmax")?;
+    let id = *tok_data.first().context("Empty argmax result")?;
+    u32::try_from(id).context("Negative token ID from argmax")
 }
 
 /// Resolve model: local directory or HuggingFace hub download.

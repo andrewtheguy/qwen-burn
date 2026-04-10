@@ -1,13 +1,12 @@
 use anyhow::{bail, Result};
-use qwencandle::{Device, QwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
+use qwen_burn::{QwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
 use std::io::Read;
 
 fn print_usage() {
-    eprintln!("Usage: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle [options]");
+    eprintln!("Usage: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwen-burn [options]");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --model <id>       HuggingFace model ID or local path (default: {DEFAULT_MODEL_ID})");
-    eprintln!("  --device <dev>     Device: cpu, metal (default: cpu)");
     eprintln!("  --language <lang>  Force output language (e.g. English, Chinese, Japanese)");
     eprintln!("  --context <text>   Condition on previous text (system prompt for consistency)");
     eprintln!();
@@ -17,37 +16,8 @@ fn print_usage() {
     eprintln!("The model is automatically downloaded from HuggingFace on first use.");
     eprintln!();
     eprintln!("Examples:");
-    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle");
-    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle --device metal");
-    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle -l Japanese");
-    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle --context \"Previous sentence.\"");
-}
-
-fn parse_device(s: &str) -> Result<Device> {
-    match s.to_lowercase().as_str() {
-        "cpu" => Ok(Device::Cpu),
-        "metal" | "mps" => {
-            #[cfg(feature = "metal")]
-            {
-                Ok(Device::new_metal(0)?)
-            }
-            #[cfg(not(feature = "metal"))]
-            {
-                bail!("Metal support not compiled. Rebuild with: cargo build --release --features metal")
-            }
-        }
-        "cuda" => {
-            #[cfg(feature = "cuda")]
-            {
-                Ok(Device::new_cuda(0)?)
-            }
-            #[cfg(not(feature = "cuda"))]
-            {
-                bail!("CUDA support not compiled. Rebuild with: cargo build --release --features cuda")
-            }
-        }
-        _ => bail!("Unknown device: {}. Supported: cpu, metal, cuda", s),
-    }
+    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwen-burn");
+    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwen-burn -l Japanese");
 }
 
 fn main() -> Result<()> {
@@ -55,7 +25,6 @@ fn main() -> Result<()> {
     let mut model_id: Option<String> = None;
     let mut language: Option<String> = None;
     let mut context: Option<String> = None;
-    let mut device_str: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -75,11 +44,6 @@ fn main() -> Result<()> {
                 if i >= args.len() { bail!("--context requires a value"); }
                 context = Some(args[i].clone());
             }
-            "--device" | "-d" => {
-                i += 1;
-                if i >= args.len() { bail!("--device requires a value"); }
-                device_str = Some(args[i].clone());
-            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -90,24 +54,17 @@ fn main() -> Result<()> {
     }
 
     let model_id = model_id.unwrap_or_else(|| DEFAULT_MODEL_ID.to_string());
-    let device = match &device_str {
-        Some(d) => parse_device(d)?,
-        None => Device::Cpu,
-    };
 
     let samples = read_wav_stdin()?;
     eprintln!("Audio: {} samples ({:.1}s)", samples.len(), samples.len() as f32 / 16000.0);
 
-    eprintln!("Loading model on {:?}...", device);
-    let mut model = QwenAsr::load_on(&model_id, &device)?;
+    use burn_ndarray::{NdArray, NdArrayDevice};
+    let device = NdArrayDevice::Cpu;
+    eprintln!("Loading model on CPU...");
+    let mut model = QwenAsr::<NdArray>::load_on(&model_id, &device)?;
+    let text = model.transcribe(&samples, language.as_deref(), context.as_deref())?;
 
-    let text = model.transcribe(
-        &samples,
-        language.as_deref(),
-        context.as_deref(),
-    )?;
     println!("{text}");
-
     Ok(())
 }
 
@@ -153,21 +110,21 @@ fn read_wav_stdin() -> Result<Vec<f32>> {
             if audio_format != 3 || bits_per_sample != 32 {
                 bail!(
                     "Wrong WAV format: audio_format={} bits={} (expected float32).\n\
-                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle",
+                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwen-burn",
                     audio_format, bits_per_sample,
                 );
             }
             if num_channels != 1 {
                 bail!(
                     "Wrong WAV channels: {} (expected mono).\n\
-                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle",
+                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwen-burn",
                     num_channels,
                 );
             }
             if sample_rate != 16000 {
                 bail!(
                     "Wrong WAV sample rate: {} (expected 16000).\n\
-                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle",
+                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwen-burn",
                     sample_rate,
                 );
             }

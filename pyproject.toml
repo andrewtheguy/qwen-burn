@@ -3,9 +3,9 @@ requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "qwencandle"
-version = "0.0.3"
-description = "Qwen3-ASR-0.6B speech-to-text inference via Candle"
+name = "qwen_burn"
+version = "0.0.1a1"
+description = "Qwen3-ASR-0.6B speech-to-text inference via Burn"
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.26"]
 

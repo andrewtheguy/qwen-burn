@@ -91,11 +91,7 @@ jobs:
             extra-features: ""
           - arch: arm64
             runs-on: macos-latest
-            extra-features: "metal"
-          - arch: amd64
-            runs-on: windows-latest
             extra-features: ""
-
     runs-on: ${{ matrix.runs-on }}
 
     steps:
@@ -109,9 +105,23 @@ jobs:
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-${{ matrix.arch }}
 
       - name: Install release build dependencies
         run: python -m pip install --upgrade pip numpy maturin
+
+      # Workaround: tracel-llvm v20.1.4-7 linux-AArch64 tarball contains
+      # directory named tracel-llvm-20.1.4-6 instead of -7.
+      # repackaged it to have the right directory name
+      # See https://github.com/tracel-ai/tracel-llvm/issues/11
+      - name: Fix tracel-llvm AArch64 directory name
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        run: |
+          LLVM_DIR="$HOME/.local/share/tracel"
+          mkdir -p "$LLVM_DIR"
+          curl -sL https://github.com/andrewtheguy/qwen-burn/releases/download/v0.0.1a1/tracel-llvm-20.1.4-7-linux-AArch64.tar.gz | tar xz -C "$LLVM_DIR"
+          touch "$LLVM_DIR/tracel-llvm-20.1.4-7/.tracel-llvm-installed"
 
       - name: Build wheel
         env:
@@ -125,8 +135,43 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
 
+  build-wheel-windows:
+    if: github.ref_name == 'main'
+    needs: prepare
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: Windows-amd64
+
+      - name: Install release build dependencies
+        run: python -m pip install --upgrade pip numpy maturin
+
+      - name: Build wheel
+        env:
+          PYO3_PYTHON: python
+        run: maturin build --release --features python -o dist
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-wheel-Windows-amd64-py312
+          path: dist/*.whl
+          if-no-files-found: error
+
   create-release:
-    needs: [prepare, build-wheel]
+    needs: [prepare, build-wheel, build-wheel-windows]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.build-wheel.result == 'success' && (needs.build-wheel-windows.result == 'success' || needs.build-wheel-windows.result == 'skipped') }}
     runs-on: ubuntu-latest
 
     steps:

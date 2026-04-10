@@ -1,3 +1,4 @@
 - no backward compatibility
-- run `cat fixtures/jfk.wav | cargo run --release --features metal` and `cat fixtures/jfk.wav | cargo run --release  --features metal -- --device metal` to test after rust code changes
-- run cargo clippy to check for clippy warnings
+- uses burn v0.20.1 with burn-ndarray backend (CPU only)
+- run `cat fixtures/jfk.wav | cargo run --release` to test after rust code changes
+- run `cargo clippy` to check for clippy warnings
