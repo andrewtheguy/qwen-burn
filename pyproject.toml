@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "qwen_burn"
-version = "0.0.1a1"
+version = "0.0.1a2"
 description = "Qwen3-ASR-0.6B speech-to-text inference via Burn"
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.26"]

@@ -3,6 +3,7 @@
 pub mod audio;
 mod decoder;
 mod encoder;
+mod fast_linear;
 pub mod tokenizer;
 pub mod weights;
 

@@ -1,10 +1,11 @@
 /// Qwen3 LLM Decoder for ASR.
 /// GQA with Q/K RMSNorm, RoPE, KV cache, SwiGLU Mlp, tied embeddings.
-use burn::nn::{Embedding, Linear, RmsNorm};
+use burn::nn::{Embedding, RmsNorm};
 use burn::tensor::activation::{silu, softmax};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 
+use crate::fast_linear::FastLinear;
 use crate::weights::Tensors;
 
 // 0.6B decoder config
@@ -187,10 +188,10 @@ impl<B: Backend> KvCache<B> {
 // ── Attention ───────────────────────────────────────────────────────────────
 
 struct Attention<B: Backend> {
-    q_proj: Linear<B>,
-    k_proj: Linear<B>,
-    v_proj: Linear<B>,
-    o_proj: Linear<B>,
+    q_proj: FastLinear<B>,
+    k_proj: FastLinear<B>,
+    v_proj: FastLinear<B>,
+    o_proj: FastLinear<B>,
     q_norm: RmsNorm<B>,
     k_norm: RmsNorm<B>,
     kv_cache: KvCache<B>,
@@ -199,10 +200,10 @@ struct Attention<B: Backend> {
 impl<B: Backend> Attention<B> {
     fn load(tensors: &Tensors, prefix: &str, device: &B::Device) -> anyhow::Result<Self> {
         Ok(Self {
-            q_proj: tensors.load_linear_no_bias::<B>(&format!("{prefix}.q_proj"), device)?,
-            k_proj: tensors.load_linear_no_bias::<B>(&format!("{prefix}.k_proj"), device)?,
-            v_proj: tensors.load_linear_no_bias::<B>(&format!("{prefix}.v_proj"), device)?,
-            o_proj: tensors.load_linear_no_bias::<B>(&format!("{prefix}.o_proj"), device)?,
+            q_proj: FastLinear::load_no_bias(tensors, &format!("{prefix}.q_proj"), device)?,
+            k_proj: FastLinear::load_no_bias(tensors, &format!("{prefix}.k_proj"), device)?,
+            v_proj: FastLinear::load_no_bias(tensors, &format!("{prefix}.v_proj"), device)?,
+            o_proj: FastLinear::load_no_bias(tensors, &format!("{prefix}.o_proj"), device)?,
             q_norm: tensors.load_rms_norm::<B>(&format!("{prefix}.q_norm"), RMS_EPS, device)?,
             k_norm: tensors.load_rms_norm::<B>(&format!("{prefix}.k_norm"), RMS_EPS, device)?,
             kv_cache: KvCache::new(),
@@ -218,9 +219,9 @@ impl<B: Backend> Attention<B> {
     ) -> Tensor<B, 3> {
         let [b, l, _] = x.dims();
 
-        let q = self.q_proj.forward(x.clone());
-        let k = self.k_proj.forward(x.clone());
-        let v = self.v_proj.forward(x.clone());
+        let q = self.q_proj.forward3d(x.clone());
+        let k = self.k_proj.forward3d(x.clone());
+        let v = self.v_proj.forward3d(x.clone());
 
         // Reshape: [B, L, H*D] → [B, H, L, D]
         let q = q
@@ -283,7 +284,7 @@ impl<B: Backend> Attention<B> {
             ctx.swap_dims(1, 2).reshape([b, l, N_HEADS * HEAD_DIM])
         };
 
-        self.o_proj.forward(out)
+        self.o_proj.forward3d(out)
     }
 
     fn clear_kv_cache(&mut self) {
@@ -294,24 +295,24 @@ impl<B: Backend> Attention<B> {
 // ── Mlp ─────────────────────────────────────────────────────────────────────
 
 struct Mlp<B: Backend> {
-    gate_proj: Linear<B>,
-    up_proj: Linear<B>,
-    down_proj: Linear<B>,
+    gate_proj: FastLinear<B>,
+    up_proj: FastLinear<B>,
+    down_proj: FastLinear<B>,
 }
 
 impl<B: Backend> Mlp<B> {
     fn load(tensors: &Tensors, prefix: &str, device: &B::Device) -> anyhow::Result<Self> {
         Ok(Self {
-            gate_proj: tensors.load_linear_no_bias::<B>(&format!("{prefix}.gate_proj"), device)?,
-            up_proj: tensors.load_linear_no_bias::<B>(&format!("{prefix}.up_proj"), device)?,
-            down_proj: tensors.load_linear_no_bias::<B>(&format!("{prefix}.down_proj"), device)?,
+            gate_proj: FastLinear::load_no_bias(tensors, &format!("{prefix}.gate_proj"), device)?,
+            up_proj: FastLinear::load_no_bias(tensors, &format!("{prefix}.up_proj"), device)?,
+            down_proj: FastLinear::load_no_bias(tensors, &format!("{prefix}.down_proj"), device)?,
         })
     }
 
     fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        let gate = silu(self.gate_proj.forward(x.clone()));
-        let up = self.up_proj.forward(x);
-        self.down_proj.forward(gate * up)
+        let gate = silu(self.gate_proj.forward3d(x.clone()));
+        let up = self.up_proj.forward3d(x);
+        self.down_proj.forward3d(gate * up)
     }
 }
 

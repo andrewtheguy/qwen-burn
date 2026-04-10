@@ -1,10 +1,11 @@
 /// Qwen3-ASR Audio Encoder.
 /// Conv2D stem (per-chunk) → sinusoidal PE → windowed Transformer → projector.
-use burn::nn::{conv::Conv2d, LayerNorm, Linear};
+use burn::nn::{conv::Conv2d, LayerNorm};
 use burn::tensor::activation::{gelu, softmax};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 
+use crate::fast_linear::FastLinear;
 use crate::weights::Tensors;
 
 // 0.6B encoder config
@@ -24,28 +25,28 @@ const CHUNK_SIZE: usize = N_WINDOW * 2; // 100 mel frames per chunk
 const NUM_MEL_BINS: usize = 128;
 
 struct EncoderAttention<B: Backend> {
-    q_proj: Linear<B>,
-    k_proj: Linear<B>,
-    v_proj: Linear<B>,
-    out_proj: Linear<B>,
+    q_proj: FastLinear<B>,
+    k_proj: FastLinear<B>,
+    v_proj: FastLinear<B>,
+    out_proj: FastLinear<B>,
 }
 
 impl<B: Backend> EncoderAttention<B> {
     fn load(tensors: &Tensors, prefix: &str, device: &B::Device) -> anyhow::Result<Self> {
         Ok(Self {
-            q_proj: tensors.load_linear::<B>(&format!("{prefix}.q_proj"), device)?,
-            k_proj: tensors.load_linear::<B>(&format!("{prefix}.k_proj"), device)?,
-            v_proj: tensors.load_linear::<B>(&format!("{prefix}.v_proj"), device)?,
-            out_proj: tensors.load_linear::<B>(&format!("{prefix}.out_proj"), device)?,
+            q_proj: FastLinear::load(tensors, &format!("{prefix}.q_proj"), device)?,
+            k_proj: FastLinear::load(tensors, &format!("{prefix}.k_proj"), device)?,
+            v_proj: FastLinear::load(tensors, &format!("{prefix}.v_proj"), device)?,
+            out_proj: FastLinear::load(tensors, &format!("{prefix}.out_proj"), device)?,
         })
     }
 
     /// Bidirectional attention over a window slice. x: [seq, d_model]
     fn forward_window(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
         let seq_len = x.dims()[0];
-        let q = self.q_proj.forward(x.clone());
-        let k = self.k_proj.forward(x.clone());
-        let v = self.v_proj.forward(x);
+        let q = self.q_proj.forward2d(x.clone());
+        let k = self.k_proj.forward2d(x.clone());
+        let v = self.v_proj.forward2d(x);
 
         // Reshape to [1, n_heads, seq, head_dim]
         let q = q
@@ -70,15 +71,15 @@ impl<B: Backend> EncoderAttention<B> {
             .squeeze::<3>()
             .swap_dims(0, 1)
             .reshape([seq_len, D_MODEL]);
-        self.out_proj.forward(out)
+        self.out_proj.forward2d(out)
     }
 }
 
 struct EncoderLayer<B: Backend> {
     self_attn: EncoderAttention<B>,
     self_attn_layer_norm: LayerNorm<B>,
-    fc1: Linear<B>,
-    fc2: Linear<B>,
+    fc1: FastLinear<B>,
+    fc2: FastLinear<B>,
     final_layer_norm: LayerNorm<B>,
 }
 
@@ -91,8 +92,8 @@ impl<B: Backend> EncoderLayer<B> {
                 1e-5,
                 device,
             )?,
-            fc1: tensors.load_linear::<B>(&format!("{prefix}.fc1"), device)?,
-            fc2: tensors.load_linear::<B>(&format!("{prefix}.fc2"), device)?,
+            fc1: FastLinear::load(tensors, &format!("{prefix}.fc1"), device)?,
+            fc2: FastLinear::load(tensors, &format!("{prefix}.fc2"), device)?,
             final_layer_norm: tensors.load_layer_norm::<B>(
                 &format!("{prefix}.final_layer_norm"),
                 1e-5,
@@ -123,8 +124,8 @@ impl<B: Backend> EncoderLayer<B> {
 
         // Pre-FFN layernorm
         let x_norm = self.final_layer_norm.forward(x.clone());
-        let ffn = gelu(self.fc1.forward(x_norm));
-        let ffn = self.fc2.forward(ffn);
+        let ffn = gelu(self.fc1.forward2d(x_norm));
+        let ffn = self.fc2.forward2d(ffn);
         x + ffn
     }
 }
@@ -136,8 +137,8 @@ pub struct AudioEncoder<B: Backend> {
     conv_out_t: Tensor<B, 2>, // pre-transposed: [7680, d_model]
     layers: Vec<EncoderLayer<B>>,
     ln_post: LayerNorm<B>,
-    proj1: Linear<B>,
-    proj2: Linear<B>,
+    proj1: FastLinear<B>,
+    proj2: FastLinear<B>,
     device: B::Device,
 }
 
@@ -183,8 +184,8 @@ impl<B: Backend> AudioEncoder<B> {
         }
 
         let ln_post = tensors.load_layer_norm::<B>(&format!("{prefix}.ln_post"), 1e-5, device)?;
-        let proj1 = tensors.load_linear::<B>(&format!("{prefix}.proj1"), device)?;
-        let proj2 = tensors.load_linear::<B>(&format!("{prefix}.proj2"), device)?;
+        let proj1 = FastLinear::load(tensors, &format!("{prefix}.proj1"), device)?;
+        let proj2 = FastLinear::load(tensors, &format!("{prefix}.proj2"), device)?;
 
         Ok(Self {
             conv2d1,
@@ -274,8 +275,8 @@ impl<B: Backend> AudioEncoder<B> {
 
         // ── Final LayerNorm + projection ──
         let h = self.ln_post.forward(h);
-        let h = gelu(self.proj1.forward(h));
-        self.proj2.forward(h)
+        let h = gelu(self.proj1.forward2d(h));
+        self.proj2.forward2d(h)
     }
 }
 
