@@ -109,6 +109,8 @@ jobs:
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-${{ matrix.arch }}
 
       - name: Install release build dependencies
         run: python -m pip install --upgrade pip numpy maturin
@@ -126,10 +128,17 @@ jobs:
           touch "$LLVM_DIR/tracel-llvm-20.1.4-7/.tracel-llvm-installed"
 
       # On Windows, tracel-mlir-sys (LLVM) is built with /MD (dynamic CRT).
-      # Force Rust to match, which is also correct for Python extensions.
+      # Force Rust and cc-compiled C++ to match via .cargo/config.toml,
+      # which takes priority over env vars that maturin may override.
       - name: Set dynamic CRT on Windows
         if: runner.os == 'Windows'
-        run: echo "RUSTFLAGS=-C target-feature=-crt-static" >> $env:GITHUB_ENV
+        shell: bash
+        run: |
+          mkdir -p .cargo
+          cat >> .cargo/config.toml << 'EOF'
+          [target.x86_64-pc-windows-msvc]
+          rustflags = ["-C", "target-feature=-crt-static"]
+          EOF
 
       - name: Build wheel
         env:
