@@ -84,6 +84,9 @@ impl<'a> Tensors<'a> {
     }
 
     /// Load a tensor with the given const dimension.
+    /// Creates the tensor on the default device first, then moves to the target
+    /// device. This avoids the LibTorch MPS "Placeholder storage" bug where
+    /// `from_data` directly on MPS panics.
     pub fn load_tensor<B: Backend, const D: usize>(
         &self,
         name: &str,
@@ -91,7 +94,8 @@ impl<'a> Tensors<'a> {
     ) -> Result<Tensor<B, D>> {
         let (floats, shape) = self.load_f32_data(name)?;
         let td = TensorData::new(floats, shape);
-        Ok(Tensor::<B, D>::from_data(td, device))
+        let tensor = Tensor::<B, D>::from_data(td, &Default::default());
+        Ok(tensor.to_device(device))
     }
 
     /// Load a linear layer (with bias). Transposes weight from [d_out, d_in] to [d_in, d_out].
