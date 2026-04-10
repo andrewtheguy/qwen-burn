@@ -1,32 +1,34 @@
-use crate::{QwenAsr as RustQwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES, Device};
+use crate::{QwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
+use burn_wgpu::{Wgpu, WgpuDevice};
 use numpy::PyReadonlyArray1;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 use std::sync::Mutex;
 
-fn parse_device(device: &str) -> PyResult<Device> {
+type B = Wgpu<f32, i32>;
+
+fn parse_device(device: &str) -> PyResult<WgpuDevice> {
     match device.to_lowercase().as_str() {
-        "cpu" => Ok(Device::Cpu),
-        "metal" | "mps" | "gpu" => Ok(Device::DefaultDevice),
+        "auto" | "metal" | "mps" | "gpu" => Ok(WgpuDevice::DefaultDevice),
         _ => Err(PyRuntimeError::new_err(format!(
-            "Unknown device: {}. Supported: cpu, metal/gpu",
+            "Unknown device: {}. Supported: auto, gpu/metal",
             device
         ))),
     }
 }
 
 #[pyclass]
-struct QwenAsr {
-    inner: Mutex<RustQwenAsr>,
+struct QwenAsrPy {
+    inner: Mutex<QwenAsr<B>>,
 }
 
 #[pymethods]
-impl QwenAsr {
+impl QwenAsrPy {
     #[new]
-    #[pyo3(signature = (model_id=None, device="cpu"))]
+    #[pyo3(signature = (model_id=None, device="auto"))]
     fn new(model_id: Option<&str>, device: &str) -> PyResult<Self> {
         let model_id = model_id.unwrap_or(DEFAULT_MODEL_ID);
         let device = parse_device(device)?;
-        let inner = RustQwenAsr::load_on(model_id, &device)
+        let inner = QwenAsr::<B>::load_on(model_id, &device)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self {
             inner: Mutex::new(inner),
@@ -41,7 +43,6 @@ impl QwenAsr {
         language: Option<&str>,
         context: Option<&str>,
     ) -> PyResult<String> {
-        // Copy data to owned types before releasing the GIL
         let samples = samples.as_slice()?.to_vec();
         let language = language.map(|s| s.to_string());
         let context = context.map(|s| s.to_string());
@@ -63,7 +64,7 @@ impl QwenAsr {
 #[pymodule]
 #[pyo3(name = "qwencandle")]
 fn qwencandle(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_class::<QwenAsr>()?;
+    module.add_class::<QwenAsrPy>()?;
     module.add("DEFAULT_MODEL_ID", DEFAULT_MODEL_ID)?;
     module.add(
         "SUPPORTED_LANGUAGES",

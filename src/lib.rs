@@ -10,13 +10,10 @@ pub mod weights;
 mod python;
 
 use anyhow::{bail, Context, Result};
+use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor};
-use burn_wgpu::{Wgpu, WgpuDevice};
 use hf_hub::api::sync::Api;
 use std::path::PathBuf;
-
-pub type B = Wgpu<f32, i32>;
-pub type Device = WgpuDevice;
 
 pub const DEFAULT_MODEL_ID: &str = "Qwen/Qwen3-ASR-0.6B";
 
@@ -42,28 +39,28 @@ pub const SUPPORTED_LANGUAGES: &[&str] = &[
     "Filipino", "Persian", "Greek", "Romanian", "Hungarian", "Macedonian",
 ];
 
-pub struct QwenAsr {
-    encoder: encoder::AudioEncoder,
-    decoder: decoder::Decoder,
+pub struct QwenAsr<B: Backend> {
+    encoder: encoder::AudioEncoder<B>,
+    decoder: decoder::Decoder<B>,
     tokenizer: tokenizer::Tokenizer,
 }
 
-impl QwenAsr {
-    /// Load model on CPU from a HuggingFace model ID or local directory path.
+impl<B: Backend> QwenAsr<B> {
+    /// Load model on the default device (auto-detect).
     pub fn load(model_id: &str) -> Result<Self> {
         Self::load_on(model_id, &Default::default())
     }
 
-    /// Load model on a specific device from a HuggingFace model ID or local directory path.
-    pub fn load_on(model_id: &str, device: &Device) -> Result<Self> {
+    /// Load model on a specific device.
+    pub fn load_on(model_id: &str, device: &B::Device) -> Result<Self> {
         let (safetensors_paths, model_dir) = resolve_model(model_id)?;
 
         let store = weights::TensorStore::open(&safetensors_paths)?;
         let tensors = store.tensors()?;
 
-        let encoder = encoder::AudioEncoder::load(&tensors, "thinker.audio_tower", device)?;
+        let encoder = encoder::AudioEncoder::<B>::load(&tensors, "thinker.audio_tower", device)?;
         let tokenizer = tokenizer::Tokenizer::load(&model_dir)?;
-        let decoder = decoder::Decoder::load(&tensors, "thinker", device)?;
+        let decoder = decoder::Decoder::<B>::load(&tensors, "thinker", device)?;
 
         Ok(Self { encoder, decoder, tokenizer })
     }

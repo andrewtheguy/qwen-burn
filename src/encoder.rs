@@ -2,10 +2,10 @@
 /// Conv2D stem (per-chunk) → sinusoidal PE → windowed Transformer → projector.
 use burn::nn::{conv::Conv2d, LayerNorm, Linear};
 use burn::tensor::activation::{gelu, softmax};
+use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 
 use crate::weights::Tensors;
-use crate::{B, Device};
 
 // 0.6B encoder config
 const D_MODEL: usize = 896;
@@ -23,20 +23,20 @@ const N_WINDOW_INFER: usize = 800;
 const CHUNK_SIZE: usize = N_WINDOW * 2; // 100 mel frames per chunk
 const NUM_MEL_BINS: usize = 128;
 
-struct EncoderAttention {
+struct EncoderAttention<B: Backend> {
     q_proj: Linear<B>,
     k_proj: Linear<B>,
     v_proj: Linear<B>,
     out_proj: Linear<B>,
 }
 
-impl EncoderAttention {
-    fn load(tensors: &Tensors, prefix: &str, device: &Device) -> anyhow::Result<Self> {
+impl<B: Backend> EncoderAttention<B> {
+    fn load(tensors: &Tensors, prefix: &str, device: &B::Device) -> anyhow::Result<Self> {
         Ok(Self {
-            q_proj: tensors.load_linear(&format!("{prefix}.q_proj"), device)?,
-            k_proj: tensors.load_linear(&format!("{prefix}.k_proj"), device)?,
-            v_proj: tensors.load_linear(&format!("{prefix}.v_proj"), device)?,
-            out_proj: tensors.load_linear(&format!("{prefix}.out_proj"), device)?,
+            q_proj: tensors.load_linear::<B>(&format!("{prefix}.q_proj"), device)?,
+            k_proj: tensors.load_linear::<B>(&format!("{prefix}.k_proj"), device)?,
+            v_proj: tensors.load_linear::<B>(&format!("{prefix}.v_proj"), device)?,
+            out_proj: tensors.load_linear::<B>(&format!("{prefix}.out_proj"), device)?,
         })
     }
 
@@ -74,26 +74,26 @@ impl EncoderAttention {
     }
 }
 
-struct EncoderLayer {
-    self_attn: EncoderAttention,
+struct EncoderLayer<B: Backend> {
+    self_attn: EncoderAttention<B>,
     self_attn_layer_norm: LayerNorm<B>,
     fc1: Linear<B>,
     fc2: Linear<B>,
     final_layer_norm: LayerNorm<B>,
 }
 
-impl EncoderLayer {
-    fn load(tensors: &Tensors, prefix: &str, device: &Device) -> anyhow::Result<Self> {
+impl<B: Backend> EncoderLayer<B> {
+    fn load(tensors: &Tensors, prefix: &str, device: &B::Device) -> anyhow::Result<Self> {
         Ok(Self {
             self_attn: EncoderAttention::load(tensors, &format!("{prefix}.self_attn"), device)?,
-            self_attn_layer_norm: tensors.load_layer_norm(
+            self_attn_layer_norm: tensors.load_layer_norm::<B>(
                 &format!("{prefix}.self_attn_layer_norm"),
                 1e-5,
                 device,
             )?,
-            fc1: tensors.load_linear(&format!("{prefix}.fc1"), device)?,
-            fc2: tensors.load_linear(&format!("{prefix}.fc2"), device)?,
-            final_layer_norm: tensors.load_layer_norm(
+            fc1: tensors.load_linear::<B>(&format!("{prefix}.fc1"), device)?,
+            fc2: tensors.load_linear::<B>(&format!("{prefix}.fc2"), device)?,
+            final_layer_norm: tensors.load_layer_norm::<B>(
                 &format!("{prefix}.final_layer_norm"),
                 1e-5,
                 device,
@@ -129,21 +129,21 @@ impl EncoderLayer {
     }
 }
 
-pub struct AudioEncoder {
+pub struct AudioEncoder<B: Backend> {
     conv2d1: Conv2d<B>,
     conv2d2: Conv2d<B>,
     conv2d3: Conv2d<B>,
     conv_out: Tensor<B, 2>, // weight only, no bias — [d_model, 7680]
-    layers: Vec<EncoderLayer>,
+    layers: Vec<EncoderLayer<B>>,
     ln_post: LayerNorm<B>,
     proj1: Linear<B>,
     proj2: Linear<B>,
-    device: Device,
+    device: B::Device,
 }
 
-impl AudioEncoder {
-    pub fn load(tensors: &Tensors, prefix: &str, device: &Device) -> anyhow::Result<Self> {
-        let conv2d1 = tensors.load_conv2d(
+impl<B: Backend> AudioEncoder<B> {
+    pub fn load(tensors: &Tensors, prefix: &str, device: &B::Device) -> anyhow::Result<Self> {
+        let conv2d1 = tensors.load_conv2d::<B>(
             &format!("{prefix}.conv2d1"),
             [2, 2],
             [3, 3],
@@ -151,7 +151,7 @@ impl AudioEncoder {
             1,
             device,
         )?;
-        let conv2d2 = tensors.load_conv2d(
+        let conv2d2 = tensors.load_conv2d::<B>(
             &format!("{prefix}.conv2d2"),
             [2, 2],
             [3, 3],
@@ -159,7 +159,7 @@ impl AudioEncoder {
             1,
             device,
         )?;
-        let conv2d3 = tensors.load_conv2d(
+        let conv2d3 = tensors.load_conv2d::<B>(
             &format!("{prefix}.conv2d3"),
             [2, 2],
             [3, 3],
@@ -168,7 +168,7 @@ impl AudioEncoder {
             device,
         )?;
         let conv_out =
-            tensors.load_tensor::<2>(&format!("{prefix}.conv_out.weight"), device)?;
+            tensors.load_tensor::<B, 2>(&format!("{prefix}.conv_out.weight"), device)?;
 
         let mut layers = Vec::with_capacity(N_LAYERS);
         for i in 0..N_LAYERS {
@@ -179,9 +179,9 @@ impl AudioEncoder {
             )?);
         }
 
-        let ln_post = tensors.load_layer_norm(&format!("{prefix}.ln_post"), 1e-5, device)?;
-        let proj1 = tensors.load_linear(&format!("{prefix}.proj1"), device)?;
-        let proj2 = tensors.load_linear(&format!("{prefix}.proj2"), device)?;
+        let ln_post = tensors.load_layer_norm::<B>(&format!("{prefix}.ln_post"), 1e-5, device)?;
+        let proj1 = tensors.load_linear::<B>(&format!("{prefix}.proj1"), device)?;
+        let proj2 = tensors.load_linear::<B>(&format!("{prefix}.proj2"), device)?;
 
         Ok(Self {
             conv2d1,
@@ -240,7 +240,7 @@ impl AudioEncoder {
 
         // ── Per-chunk sinusoidal position embeddings ──
         let tokens_per_chunk = chunk_outputs[0].dims()[0];
-        let pos_emb = sinusoidal_position_embedding(tokens_per_chunk, D_MODEL, &self.device);
+        let pos_emb = sinusoidal_position_embedding::<B>(tokens_per_chunk, D_MODEL, &self.device);
 
         let mut x = x;
         let mut offset = 0;
@@ -287,10 +287,10 @@ impl AudioEncoder {
 }
 
 /// Sinusoidal position embedding: [length, channels]
-fn sinusoidal_position_embedding(
+fn sinusoidal_position_embedding<B: Backend>(
     length: usize,
     channels: usize,
-    device: &Device,
+    device: &B::Device,
 ) -> Tensor<B, 2> {
     let half = channels / 2;
     let log_timescale = (10000.0f64).ln() / (half - 1) as f64;
