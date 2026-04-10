@@ -59,13 +59,9 @@ impl QwenAsr {
         let store = weights::TensorStore::open(&safetensors_paths)?;
         let tensors = store.tensors()?;
 
-        eprintln!("  Loading encoder...");
         let encoder = encoder::AudioEncoder::load(&tensors, "thinker.audio_tower", device)?;
-        eprintln!("  Loading tokenizer...");
         let tokenizer = tokenizer::Tokenizer::load(&model_dir)?;
-        eprintln!("  Loading decoder...");
         let decoder = decoder::Decoder::load(&tensors, "thinker", device)?;
-        eprintln!("  Model loaded.");
 
         Ok(Self { encoder, decoder, tokenizer })
     }
@@ -93,15 +89,8 @@ impl QwenAsr {
         let mel = audio::compute_mel_spectrogram(samples);
 
         // Encoder
-        eprintln!("  Encoding audio...");
         let audio_embeds = self.encoder.forward(&mel, n_frames);
         let n_audio = audio_embeds.dims()[0];
-        // Debug: audio embedding stats
-        let ae_data: Vec<f32> = audio_embeds.clone().into_data().to_vec().unwrap();
-        let ae_mean: f32 = ae_data.iter().sum::<f32>() / ae_data.len() as f32;
-        let ae_max = ae_data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let ae_min = ae_data.iter().cloned().fold(f32::INFINITY, f32::min);
-        eprintln!("  Audio encoded: {} tokens, mean={ae_mean:.4}, range=[{ae_min:.4}, {ae_max:.4}]", n_audio);
 
         // Tokenize context and language
         let context_tokens = match context {
@@ -148,25 +137,16 @@ impl QwenAsr {
         self.decoder.clear_kv_cache();
 
         // Prefill
-        eprintln!("  Prefilling {} tokens...", prompt_len - 1);
         let prefill_embeds = input_embeds.clone().narrow(0, 0, prompt_len - 1);
         self.decoder.forward_embed(&prefill_embeds, 0);
-        eprintln!("  Prefill done.");
 
         // First token
-        eprintln!("  Generating first token...");
         let last_embed = input_embeds.narrow(0, prompt_len - 1, 1);
         let logits = self.decoder.forward_embed(&last_embed, prompt_len - 1);
-        // Debug: print top-5 logits
-        let logits_data: Vec<f32> = logits.clone().into_data().to_vec().unwrap();
-        let mut indexed: Vec<(usize, f32)> = logits_data.iter().copied().enumerate().collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        eprintln!("  Top-5 logits: {:?}", &indexed[..5]);
         let tok_tensor: Tensor<B, 2, Int> = logits.argmax(1);
         let tok_data: Vec<i32> = tok_tensor.into_data().to_vec().unwrap();
         let mut token = tok_data[0] as u32;
         let mut generated = vec![token];
-        eprintln!("  First token: {}", token);
 
         // Autoregressive decode
         let max_new_tokens = 1024;
@@ -177,7 +157,7 @@ impl QwenAsr {
             let pos = prompt_len + step;
             let logits = self.decoder.forward_token(token, pos);
             let tok_tensor: Tensor<B, 2, Int> = logits.argmax(1);
-            let tok_data: Vec<i64> = tok_tensor.into_data().to_vec().unwrap();
+            let tok_data: Vec<i32> = tok_tensor.into_data().to_vec().unwrap();
             token = tok_data[0] as u32;
             generated.push(token);
         }

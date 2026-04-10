@@ -83,32 +83,29 @@ impl RotaryEmbedding {
         (q_out, k_out)
     }
 
-    /// Apply rotation to a single tensor [B, H, L, D]
+    /// Apply rotation to a single tensor [B, H, L, D].
+    /// Uses split-half convention (NeoX-style): x1 = x[..., :d/2], x2 = x[..., d/2:]
+    #[allow(clippy::too_many_arguments)]
     fn rope_tensor(
         &self,
         x: Tensor<B, 4>,
         cos: &Tensor<B, 4>,
         sin: &Tensor<B, 4>,
-        b: usize,
-        h: usize,
-        l: usize,
+        _b: usize,
+        _h: usize,
+        _l: usize,
         half: usize,
     ) -> Tensor<B, 4> {
-        // Split x into pairs: reshape [B, H, L, D] → [B, H, L, D/2, 2]
-        let x = x.reshape([b, h, l, half, 2]);
-        let x0 = x.clone().narrow(4, 0, 1); // [B, H, L, half, 1]
-        let x1 = x.narrow(4, 1, 1);         // [B, H, L, half, 1]
+        // Split into first half and second half along last dim
+        let x1 = x.clone().narrow(3, 0, half);       // [B, H, L, half] — first half
+        let x2 = x.narrow(3, half, half);              // [B, H, L, half] — second half
 
-        // cos/sin are [1, 1, L, half], expand to [1, 1, L, half, 1]
-        let cos = cos.clone().reshape([1, 1, l, half, 1]);
-        let sin = sin.clone().reshape([1, 1, l, half, 1]);
+        // out1 = x1 * cos - x2 * sin
+        // out2 = x1 * sin + x2 * cos
+        let out1 = x1.clone() * cos.clone() - x2.clone() * sin.clone();
+        let out2 = x1 * sin.clone() + x2 * cos.clone();
 
-        // out[..., 0] = x0 * cos - x1 * sin
-        // out[..., 1] = x1 * cos + x0 * sin
-        let out0 = x0.clone() * cos.clone() - x1.clone() * sin.clone();
-        let out1 = x1 * cos + x0 * sin;
-
-        Tensor::cat(vec![out0, out1], 4).reshape([b, h, l, half * 2])
+        Tensor::cat(vec![out1, out2], 3)
     }
 }
 
