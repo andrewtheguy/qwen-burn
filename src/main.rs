@@ -83,10 +83,10 @@ fn main() -> Result<()> {
             run::<Cpu>(&model_id, &device, &samples, language.as_deref(), context.as_deref())?
         }
         "auto" | "gpu" | "metal" | "mps" => {
-            use burn_wgpu::{Wgpu, WgpuDevice};
-            let device = WgpuDevice::DefaultDevice;
-            eprintln!("Loading model on GPU...");
-            run::<Wgpu>(&model_id, &device, &samples, language.as_deref(), context.as_deref())?
+            use burn_tch::{LibTorch, LibTorchDevice};
+            let device = LibTorchDevice::Mps;
+            eprintln!("Loading model on Metal (MPS)...");
+            run::<LibTorch>(&model_id, &device, &samples, language.as_deref(), context.as_deref())?
         }
         other => bail!("Unknown device: {}. Supported: auto, cpu, gpu/metal", other),
     };

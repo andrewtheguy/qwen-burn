@@ -175,6 +175,7 @@ fn argmax_token<B: Backend>(logits: Tensor<B, 2>) -> Result<u32> {
     let tok_tensor: Tensor<B, 2, Int> = logits.argmax(1);
     let tok_data: Vec<i32> = tok_tensor
         .into_data()
+        .convert::<i32>()
         .to_vec()
         .context("Failed to extract token from argmax")?;
     let id = *tok_data.first().context("Empty argmax result")?;

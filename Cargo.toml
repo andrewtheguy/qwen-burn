@@ -8,9 +8,9 @@ name = "qwencandle"
 
 [dependencies]
 burn = "0.20.1"
+burn-tch = { version = "0.20.1", optional = true }
 burn-cuda = { version = "0.20.1", optional = true }
 burn-cpu = "0.20.1"
-burn-wgpu = "0.20.1"
 safetensors = "0.7.0"
 memmap2 = "0.9"
 half = { version = "2", features = ["num-traits"] }
@@ -25,6 +25,6 @@ numpy = { version = "0.27", optional = true }
 
 [features]
 default = []
-metal = ["burn-wgpu/metal"]
+metal = ["dep:burn-tch"]
 cuda = ["burn-cuda"]
 python = ["dep:pyo3", "dep:numpy"]
