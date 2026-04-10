@@ -9,7 +9,7 @@ name = "qwencandle"
 [dependencies]
 burn = "0.20.1"
 burn-cuda = { version = "0.20.1", optional = true }
-burn-wgpu = "0.20.1"
+burn-wgpu = { version = "0.20.1", optional = true }
 safetensors = "0.7.0"
 memmap2 = "0.9"
 half = { version = "2", features = ["num-traits"] }
