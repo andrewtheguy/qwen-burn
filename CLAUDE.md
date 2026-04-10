@@ -1,4 +1,4 @@
 - no backward compatibility
 - uses burn v0.20.1 with burn-wgpu backend (Metal GPU via WebGPU)
-- run `cat fixtures/jfk.wav | cargo run --release --features metal --device cpu`` and `cat fixtures/jfk.wav | cargo run --release --features metal -- --device metal` in addition  to cpu if mps is available to test after rust code changes
+- run `cat fixtures/jfk.wav | cargo run --release --features metal -- --device cpu`` and `cat fixtures/jfk.wav | cargo run --release --features metal -- --device metal` in addition  to cpu if mps is available to test after rust code changes
 - run `cargo clippy --features metal` to check for clippy warnings
