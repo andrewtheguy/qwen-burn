@@ -117,14 +117,14 @@ jobs:
 
       # Workaround: tracel-llvm v20.1.4-7 linux-AArch64 tarball contains
       # directory named tracel-llvm-20.1.4-6 instead of -7.
+      # repackaged it to have the right directory name
       # See https://github.com/tracel-ai/tracel-llvm/issues/11
       - name: Fix tracel-llvm AArch64 directory name
         if: runner.os == 'Linux' && runner.arch == 'ARM64'
         run: |
           LLVM_DIR="$HOME/.local/share/tracel"
           mkdir -p "$LLVM_DIR"
-          curl -sL https://github.com/tracel-ai/tracel-llvm/releases/download/v20.1.4-7/linux-AArch64.tar.xz | tar xJ -C "$LLVM_DIR"
-          mv "$LLVM_DIR/tracel-llvm-20.1.4-6" "$LLVM_DIR/tracel-llvm-20.1.4-7"
+          curl -sL https://github.com/andrewtheguy/qwencandle/releases/download/v0.0.1a1/tracel-llvm-20.1.4-7-linux-AArch64.tar.gz | tar xx -C "$LLVM_DIR"
           touch "$LLVM_DIR/tracel-llvm-20.1.4-7/.tracel-llvm-installed"
 
       # On Windows, tracel-mlir-sys (LLVM) is built with /MD (dynamic CRT).
