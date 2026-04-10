@@ -92,9 +92,9 @@ jobs:
           - arch: arm64
             runs-on: macos-latest
             extra-features: "metal"
-          # - arch: amd64
-          #   runs-on: windows-latest
-          #   extra-features: ""
+          - arch: amd64
+            runs-on: windows-latest
+            extra-features: ""
 
     runs-on: ${{ matrix.runs-on }}
 
@@ -126,19 +126,6 @@ jobs:
           mkdir -p "$LLVM_DIR"
           curl -sL https://github.com/andrewtheguy/qwencandle/releases/download/v0.0.1a1/tracel-llvm-20.1.4-7-linux-AArch64.tar.gz | tar xz -C "$LLVM_DIR"
           touch "$LLVM_DIR/tracel-llvm-20.1.4-7/.tracel-llvm-installed"
-
-      # On Windows, tracel-mlir-sys (LLVM) is built with /MD (dynamic CRT).
-      # Force Rust and cc-compiled C++ to match via .cargo/config.toml,
-      # which takes priority over env vars that maturin may override.
-      - name: Set dynamic CRT on Windows
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          mkdir -p .cargo
-          cat >> .cargo/config.toml << 'EOF'
-          [target.x86_64-pc-windows-msvc]
-          rustflags = ["-C", "target-feature=-crt-static"]
-          EOF
 
       - name: Build wheel
         env:
