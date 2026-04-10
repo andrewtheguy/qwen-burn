@@ -133,7 +133,7 @@ pub struct AudioEncoder<B: Backend> {
     conv2d1: Conv2d<B>,
     conv2d2: Conv2d<B>,
     conv2d3: Conv2d<B>,
-    conv_out: Tensor<B, 2>, // weight only, no bias — [d_model, 7680]
+    conv_out_t: Tensor<B, 2>, // pre-transposed: [7680, d_model]
     layers: Vec<EncoderLayer<B>>,
     ln_post: LayerNorm<B>,
     proj1: Linear<B>,
@@ -169,6 +169,9 @@ impl<B: Backend> AudioEncoder<B> {
         )?;
         let conv_out =
             tensors.load_tensor::<B, 2>(&format!("{prefix}.conv_out.weight"), device)?;
+        let conv_out_t_view = conv_out.transpose();
+        let [r, c] = conv_out_t_view.dims();
+        let conv_out_t = conv_out_t_view.reshape([r, c]); // force contiguous
 
         let mut layers = Vec::with_capacity(N_LAYERS);
         for i in 0..N_LAYERS {
@@ -187,7 +190,7 @@ impl<B: Backend> AudioEncoder<B> {
             conv2d1,
             conv2d2,
             conv2d3,
-            conv_out,
+            conv_out_t,
             layers,
             ln_post,
             proj1,
@@ -231,22 +234,24 @@ impl<B: Backend> AudioEncoder<B> {
             start += CHUNK_SIZE;
         }
 
+        // Extract per-chunk token counts before consuming chunk_outputs
+        let chunk_token_counts: Vec<usize> =
+            chunk_outputs.iter().map(|c| c.dims()[0]).collect();
+        let tokens_per_chunk = chunk_token_counts[0];
+
         // Concatenate chunks → [total_tokens, 480*freq]
-        let x = Tensor::cat(chunk_outputs.clone(), 0);
+        let x = Tensor::cat(chunk_outputs, 0);
         let total_tokens = x.dims()[0];
 
         // Linear projection: [total_tokens, 7680] → [total_tokens, d_model]
-        let x = x.matmul(self.conv_out.clone().transpose());
+        let x = x.matmul(self.conv_out_t.clone());
 
         // ── Per-chunk sinusoidal position embeddings ──
-        // Each chunk gets the same PE (truncated to chunk length). Build the full
-        // PE tensor by tiling per-chunk PE across all chunks.
-        let tokens_per_chunk = chunk_outputs[0].dims()[0];
         let pos_emb = sinusoidal_position_embedding::<B>(tokens_per_chunk, D_MODEL, &self.device);
 
-        let pe_chunks: Vec<Tensor<B, 2>> = chunk_outputs
+        let pe_chunks: Vec<Tensor<B, 2>> = chunk_token_counts
             .iter()
-            .map(|co| pos_emb.clone().narrow(0, 0, co.dims()[0]))
+            .map(|&count| pos_emb.clone().narrow(0, 0, count))
             .collect();
         let full_pe = Tensor::cat(pe_chunks, 0); // [total_tokens, D_MODEL]
         let x = x + full_pe;

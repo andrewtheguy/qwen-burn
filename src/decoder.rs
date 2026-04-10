@@ -98,14 +98,27 @@ impl<B: Backend> RotaryEmbedding<B> {
 
 // ── KV Cache ───────────────────────────────────────────────────────────────
 
+/// Pre-allocated KV cache. Uses `slice_assign` to write new tokens into a
+/// fixed buffer, avoiding O(n) copies per decode step (the old concat approach
+/// was O(n²) total). The buffer is allocated on the first append with headroom
+/// for decode tokens and doubled if it ever fills up.
 struct KvCache<B: Backend> {
-    k: Option<Tensor<B, 4>>,
-    v: Option<Tensor<B, 4>>,
+    k_buf: Option<Tensor<B, 4>>, // [1, N_KV_HEADS, capacity, HEAD_DIM]
+    v_buf: Option<Tensor<B, 4>>,
+    len: usize,
+    capacity: usize,
 }
+
+const KV_HEADROOM: usize = 1280; // room for 1024 decode tokens + margin
 
 impl<B: Backend> KvCache<B> {
     fn new() -> Self {
-        Self { k: None, v: None }
+        Self {
+            k_buf: None,
+            v_buf: None,
+            len: 0,
+            capacity: 0,
+        }
     }
 
     fn append(
@@ -113,22 +126,61 @@ impl<B: Backend> KvCache<B> {
         k: Tensor<B, 4>,
         v: Tensor<B, 4>,
     ) -> (Tensor<B, 4>, Tensor<B, 4>) {
-        let k = match self.k.take() {
-            Some(old) => Tensor::cat(vec![old, k], 2),
-            None => k,
-        };
-        let v = match self.v.take() {
-            Some(old) => Tensor::cat(vec![old, v], 2),
-            None => v,
-        };
-        self.k = Some(k.clone());
-        self.v = Some(v.clone());
-        (k, v)
+        let [b, h, new_len, d] = k.dims();
+        let required = self.len + new_len;
+
+        if self.k_buf.is_none() {
+            // First call (prefill): allocate with headroom
+            let cap = required + KV_HEADROOM;
+            let device = k.device();
+            let mut k_buf = Tensor::<B, 4>::zeros([b, h, cap, d], &device);
+            let mut v_buf = Tensor::<B, 4>::zeros([b, h, cap, d], &device);
+            k_buf = k_buf.slice_assign([0..b, 0..h, 0..new_len, 0..d], k);
+            v_buf = v_buf.slice_assign([0..b, 0..h, 0..new_len, 0..d], v);
+            self.k_buf = Some(k_buf);
+            self.v_buf = Some(v_buf);
+            self.len = new_len;
+            self.capacity = cap;
+        } else if required > self.capacity {
+            // Rare: grow by doubling
+            let new_cap = std::cmp::max(self.capacity * 2, required + KV_HEADROOM);
+            let device = k.device();
+            let mut new_k = Tensor::<B, 4>::zeros([b, h, new_cap, d], &device);
+            let mut new_v = Tensor::<B, 4>::zeros([b, h, new_cap, d], &device);
+            // Copy old valid data
+            let old_k = self.k_buf.take().unwrap().narrow(2, 0, self.len);
+            let old_v = self.v_buf.take().unwrap().narrow(2, 0, self.len);
+            new_k = new_k.slice_assign([0..b, 0..h, 0..self.len, 0..d], old_k);
+            new_v = new_v.slice_assign([0..b, 0..h, 0..self.len, 0..d], old_v);
+            // Write new data
+            new_k = new_k.slice_assign([0..b, 0..h, self.len..required, 0..d], k);
+            new_v = new_v.slice_assign([0..b, 0..h, self.len..required, 0..d], v);
+            self.k_buf = Some(new_k);
+            self.v_buf = Some(new_v);
+            self.len = required;
+            self.capacity = new_cap;
+        } else {
+            // Normal decode: write into existing buffer (O(new_len) when refcount==1)
+            let mut k_buf = self.k_buf.take().unwrap();
+            let mut v_buf = self.v_buf.take().unwrap();
+            k_buf = k_buf.slice_assign([0..b, 0..h, self.len..required, 0..d], k);
+            v_buf = v_buf.slice_assign([0..b, 0..h, self.len..required, 0..d], v);
+            self.k_buf = Some(k_buf);
+            self.v_buf = Some(v_buf);
+            self.len = required;
+        }
+
+        // Return narrow views of the valid region
+        let k_out = self.k_buf.as_ref().unwrap().clone().narrow(2, 0, self.len);
+        let v_out = self.v_buf.as_ref().unwrap().clone().narrow(2, 0, self.len);
+        (k_out, v_out)
     }
 
     fn reset(&mut self) {
-        self.k = None;
-        self.v = None;
+        self.k_buf = None;
+        self.v_buf = None;
+        self.len = 0;
+        self.capacity = 0;
     }
 }
 
@@ -195,36 +247,42 @@ impl<B: Backend> Attention<B> {
         // KV cache
         let (k, v) = self.kv_cache.append(k, v);
 
-        // GQA: repeat KV heads
-        let n_groups = N_HEADS / N_KV_HEADS;
-        let k = if n_groups > 1 {
-            let [b_sz, n_kv, seq, hd] = k.dims();
-            Tensor::cat(vec![k; n_groups], 2)
-                .reshape([b_sz, n_kv * n_groups, seq, hd])
-        } else {
-            k
-        };
-        let v = if n_groups > 1 {
-            let [b_sz, n_kv, seq, hd] = v.dims();
-            Tensor::cat(vec![v; n_groups], 2)
-                .reshape([b_sz, n_kv * n_groups, seq, hd])
-        } else {
-            v
-        };
-
-        // Attention
+        // Attention with GQA via 5D broadcast (avoids materialising expanded K,V)
         let scale = 1.0 / (HEAD_DIM as f64).sqrt();
-        let mut scores = q.matmul(k.swap_dims(2, 3)).mul_scalar(scale);
-        if let Some(m) = mask {
-            scores = scores + m.clone();
-        }
-        let probs = softmax(scores, 3);
-        let ctx = probs.matmul(v);
+        let n_groups = N_HEADS / N_KV_HEADS;
 
-        // Merge heads
-        let out = ctx
-            .swap_dims(1, 2)
-            .reshape([b, l, N_HEADS * HEAD_DIM]);
+        let out = if n_groups > 1 {
+            let [_, n_kv, seq_kv, hd] = k.dims();
+            let seq_q = q.dims()[2];
+
+            // Reshape to 5D: Q gets explicit group dim, K/V get size-1 group for broadcast
+            let q: Tensor<B, 5> = q.reshape([b, n_kv, n_groups, seq_q, hd]);
+            let k: Tensor<B, 5> = k.reshape([b, n_kv, 1, seq_kv, hd]);
+            let v: Tensor<B, 5> = v.reshape([b, n_kv, 1, seq_kv, hd]);
+
+            // scores: [b, n_kv, n_groups, seq_q, seq_kv]
+            let mut scores = q.matmul(k.swap_dims(3, 4)).mul_scalar(scale);
+            if let Some(m) = mask {
+                let m: Tensor<B, 5> = m.clone().unsqueeze_dim(2);
+                scores = scores + m;
+            }
+            let probs = softmax(scores, 4);
+            let ctx: Tensor<B, 5> = probs.matmul(v);
+
+            // Merge groups + heads: [b, n_kv, n_groups, seq_q, hd] → [b, seq_q, N_HEADS*hd]
+            let ctx: Tensor<B, 4> = ctx.reshape([b, N_HEADS, seq_q, hd]);
+            ctx.swap_dims(1, 2).reshape([b, seq_q, N_HEADS * hd])
+        } else {
+            // MHA path (no grouping)
+            let mut scores = q.matmul(k.swap_dims(2, 3)).mul_scalar(scale);
+            if let Some(m) = mask {
+                scores = scores + m.clone();
+            }
+            let probs = softmax(scores, 3);
+            let ctx = probs.matmul(v);
+            ctx.swap_dims(1, 2).reshape([b, l, N_HEADS * HEAD_DIM])
+        };
+
         self.o_proj.forward(out)
     }
 
@@ -310,7 +368,7 @@ pub struct Decoder<B: Backend> {
     embed_tokens: Embedding<B>,
     layers: Vec<DecoderLayer<B>>,
     norm: RmsNorm<B>,
-    lm_head_weight: Tensor<B, 2>, // tied with embed_tokens
+    lm_head_weight_t: Tensor<B, 2>, // pre-transposed: [hidden, vocab]
     rotary: RotaryEmbedding<B>,
     device: B::Device,
 }
@@ -330,14 +388,18 @@ impl<B: Backend> Decoder<B> {
         }
 
         let norm = tensors.load_rms_norm::<B>(&format!("{prefix}.model.norm"), RMS_EPS, device)?;
-        let lm_head_weight = embed_tokens.weight.val();
+        // Pre-transpose and force contiguous for faster lm_head matmul
+        let lm_head_weight = embed_tokens.weight.val(); // [vocab, hidden]
+        let lm_head_t = lm_head_weight.transpose(); // non-contiguous view [hidden, vocab]
+        let [r, c] = lm_head_t.dims();
+        let lm_head_weight_t = lm_head_t.reshape([r, c]); // force contiguous
         let rotary = RotaryEmbedding::new(device);
 
         Ok(Self {
             embed_tokens,
             layers,
             norm,
-            lm_head_weight,
+            lm_head_weight_t,
             rotary,
             device: device.clone(),
         })
@@ -404,7 +466,7 @@ impl<B: Backend> Decoder<B> {
         let seq_len = h.dims()[1];
         let hidden = h.dims()[2];
         let last: Tensor<B, 2> = h.narrow(1, seq_len - 1, 1).reshape([1, hidden]);
-        last.matmul(self.lm_head_weight.clone().transpose())
+        last.matmul(self.lm_head_weight_t.clone())
     }
 
     /// Forward pass for a single token during autoregressive generation.
@@ -414,7 +476,7 @@ impl<B: Backend> Decoder<B> {
         let h = self.forward_hidden(&embed_3d, offset);
         let hidden = h.dims()[2];
         let h: Tensor<B, 2> = h.reshape([1, hidden]);
-        h.matmul(self.lm_head_weight.clone().transpose())
+        h.matmul(self.lm_head_weight_t.clone())
     }
 
     pub fn clear_kv_cache(&mut self) {
