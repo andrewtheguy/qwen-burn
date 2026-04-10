@@ -82,11 +82,19 @@ fn main() -> Result<()> {
             eprintln!("Loading model on CPU...");
             run::<Cpu>(&model_id, &device, &samples, language.as_deref(), context.as_deref())?
         }
+        #[cfg(feature = "metal")]
         "auto" | "gpu" | "metal" | "mps" => {
             use burn_tch::{LibTorch, LibTorchDevice};
             let device = LibTorchDevice::Mps;
             eprintln!("Loading model on Metal (MPS)...");
             run::<LibTorch>(&model_id, &device, &samples, language.as_deref(), context.as_deref())?
+        }
+        #[cfg(not(feature = "metal"))]
+        "auto" => {
+            use burn_cpu::{Cpu, CpuDevice};
+            let device = CpuDevice;
+            eprintln!("Loading model on CPU...");
+            run::<Cpu>(&model_id, &device, &samples, language.as_deref(), context.as_deref())?
         }
         other => bail!("Unknown device: {}. Supported: auto, cpu, gpu/metal", other),
     };
