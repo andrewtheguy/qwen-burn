@@ -96,6 +96,20 @@ uv pip install numpy maturin
 maturin develop --release
 ```
 
+### Build a local wheel
+
+From the repo root, build a wheel into `dist/` with:
+
+```
+maturin build --release --features python -o dist
+```
+
+Then install the generated wheel locally, for example:
+
+```
+uv pip install dist/*.whl
+```
+
 ### Usage
 
 ```python
