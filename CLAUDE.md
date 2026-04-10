@@ -3,3 +3,4 @@
 - run `cat fixtures/jfk.wav | cargo run --release` to test after rust code changes
 - run `cargo clippy` to check for clippy warnings
 - use ./tmp/ for temporary artifacts so that it is easier to inspect
+- use chunks from https://saveaudio.local.168234.xyz/api/show/knx_news/opus-playlist.m3u8?start_id=48657&end_id=54777 for testing longer audios, but not the entire file otherwise it will run out of memory
