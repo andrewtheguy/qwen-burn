@@ -2,10 +2,10 @@
 /// GQA with Q/K RMSNorm, RoPE, KV cache, SwiGLU Mlp, tied embeddings.
 use burn::nn::{Embedding, Linear, RmsNorm};
 use burn::tensor::activation::{silu, softmax};
+use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 
 use crate::weights::Tensors;
-use crate::{B, Device};
 
 // 0.6B decoder config
 #[allow(dead_code)]
@@ -22,22 +22,21 @@ const ROPE_THETA: f64 = 1_000_000.0;
 const RMS_EPS: f64 = 1e-6;
 const MAX_SEQ_LEN: usize = 65536;
 
-// ── RoPE (matches candle's interleaved rope implementation) ────────────────
+// ── RoPE (split-half / NeoX convention) ────────────────────────────────────
 
-struct RotaryEmbedding {
+struct RotaryEmbedding<B: Backend> {
     sin: Tensor<B, 2>, // [MAX_SEQ_LEN, HEAD_DIM/2]
     cos: Tensor<B, 2>,
 }
 
-impl RotaryEmbedding {
-    fn new(device: &Device) -> Self {
+impl<B: Backend> RotaryEmbedding<B> {
+    fn new(device: &B::Device) -> Self {
         let half = HEAD_DIM / 2;
         let inv_freq: Vec<f32> = (0..HEAD_DIM)
             .step_by(2)
             .map(|i| 1.0 / ROPE_THETA.powf(i as f64 / HEAD_DIM as f64) as f32)
             .collect();
 
-        // freqs[t, i] = t * inv_freq[i]
         let mut sin_data = vec![0.0f32; MAX_SEQ_LEN * half];
         let mut cos_data = vec![0.0f32; MAX_SEQ_LEN * half];
         for t in 0..MAX_SEQ_LEN {
@@ -59,49 +58,37 @@ impl RotaryEmbedding {
         Self { sin, cos }
     }
 
-    /// Apply RoPE to q and k of shape [B, H, L, D] using interleaved pairs.
+    /// Apply RoPE to q and k of shape [B, H, L, D].
     fn apply(
         &self,
         q: Tensor<B, 4>,
         k: Tensor<B, 4>,
         offset: usize,
     ) -> (Tensor<B, 4>, Tensor<B, 4>) {
-        let [b, h_q, l, d] = q.dims();
-        let h_k = k.dims()[1];
+        let [_, _, l, d] = q.dims();
         let half = d / 2;
 
-        // Get sin/cos for this position range: [L, half]
         let cos = self.cos.clone().narrow(0, offset, l);
         let sin = self.sin.clone().narrow(0, offset, l);
 
-        // Reshape sin/cos to [1, 1, L, half] for broadcasting
         let cos = cos.reshape([1, 1, l, half]);
         let sin = sin.reshape([1, 1, l, half]);
 
-        let q_out = self.rope_tensor(q, &cos, &sin, b, h_q, l, half);
-        let k_out = self.rope_tensor(k, &cos, &sin, b, h_k, l, half);
+        let q_out = Self::rope_tensor(q, &cos, &sin, half);
+        let k_out = Self::rope_tensor(k, &cos, &sin, half);
         (q_out, k_out)
     }
 
-    /// Apply rotation to a single tensor [B, H, L, D].
-    /// Uses split-half convention (NeoX-style): x1 = x[..., :d/2], x2 = x[..., d/2:]
-    #[allow(clippy::too_many_arguments)]
+    /// Split-half rotation: x1 = x[..., :d/2], x2 = x[..., d/2:]
     fn rope_tensor(
-        &self,
         x: Tensor<B, 4>,
         cos: &Tensor<B, 4>,
         sin: &Tensor<B, 4>,
-        _b: usize,
-        _h: usize,
-        _l: usize,
         half: usize,
     ) -> Tensor<B, 4> {
-        // Split into first half and second half along last dim
-        let x1 = x.clone().narrow(3, 0, half);       // [B, H, L, half] — first half
-        let x2 = x.narrow(3, half, half);              // [B, H, L, half] — second half
+        let x1 = x.clone().narrow(3, 0, half);
+        let x2 = x.narrow(3, half, half);
 
-        // out1 = x1 * cos - x2 * sin
-        // out2 = x1 * sin + x2 * cos
         let out1 = x1.clone() * cos.clone() - x2.clone() * sin.clone();
         let out2 = x1 * sin.clone() + x2 * cos.clone();
 
@@ -111,12 +98,12 @@ impl RotaryEmbedding {
 
 // ── KV Cache ───────────────────────────────────────────────────────────────
 
-struct KvCache {
+struct KvCache<B: Backend> {
     k: Option<Tensor<B, 4>>,
     v: Option<Tensor<B, 4>>,
 }
 
-impl KvCache {
+impl<B: Backend> KvCache<B> {
     fn new() -> Self {
         Self { k: None, v: None }
     }
@@ -147,25 +134,25 @@ impl KvCache {
 
 // ── Attention ───────────────────────────────────────────────────────────────
 
-struct Attention {
+struct Attention<B: Backend> {
     q_proj: Linear<B>,
     k_proj: Linear<B>,
     v_proj: Linear<B>,
     o_proj: Linear<B>,
     q_norm: RmsNorm<B>,
     k_norm: RmsNorm<B>,
-    kv_cache: KvCache,
+    kv_cache: KvCache<B>,
 }
 
-impl Attention {
-    fn load(tensors: &Tensors, prefix: &str, device: &Device) -> anyhow::Result<Self> {
+impl<B: Backend> Attention<B> {
+    fn load(tensors: &Tensors, prefix: &str, device: &B::Device) -> anyhow::Result<Self> {
         Ok(Self {
-            q_proj: tensors.load_linear_no_bias(&format!("{prefix}.q_proj"), device)?,
-            k_proj: tensors.load_linear_no_bias(&format!("{prefix}.k_proj"), device)?,
-            v_proj: tensors.load_linear_no_bias(&format!("{prefix}.v_proj"), device)?,
-            o_proj: tensors.load_linear_no_bias(&format!("{prefix}.o_proj"), device)?,
-            q_norm: tensors.load_rms_norm(&format!("{prefix}.q_norm"), RMS_EPS, device)?,
-            k_norm: tensors.load_rms_norm(&format!("{prefix}.k_norm"), RMS_EPS, device)?,
+            q_proj: tensors.load_linear_no_bias::<B>(&format!("{prefix}.q_proj"), device)?,
+            k_proj: tensors.load_linear_no_bias::<B>(&format!("{prefix}.k_proj"), device)?,
+            v_proj: tensors.load_linear_no_bias::<B>(&format!("{prefix}.v_proj"), device)?,
+            o_proj: tensors.load_linear_no_bias::<B>(&format!("{prefix}.o_proj"), device)?,
+            q_norm: tensors.load_rms_norm::<B>(&format!("{prefix}.q_norm"), RMS_EPS, device)?,
+            k_norm: tensors.load_rms_norm::<B>(&format!("{prefix}.k_norm"), RMS_EPS, device)?,
             kv_cache: KvCache::new(),
         })
     }
@@ -174,7 +161,7 @@ impl Attention {
         &mut self,
         x: &Tensor<B, 3>,
         mask: Option<&Tensor<B, 4>>,
-        rotary: &RotaryEmbedding,
+        rotary: &RotaryEmbedding<B>,
         offset: usize,
     ) -> Tensor<B, 3> {
         let [b, l, _] = x.dims();
@@ -248,18 +235,18 @@ impl Attention {
 
 // ── Mlp ─────────────────────────────────────────────────────────────────────
 
-struct Mlp {
+struct Mlp<B: Backend> {
     gate_proj: Linear<B>,
     up_proj: Linear<B>,
     down_proj: Linear<B>,
 }
 
-impl Mlp {
-    fn load(tensors: &Tensors, prefix: &str, device: &Device) -> anyhow::Result<Self> {
+impl<B: Backend> Mlp<B> {
+    fn load(tensors: &Tensors, prefix: &str, device: &B::Device) -> anyhow::Result<Self> {
         Ok(Self {
-            gate_proj: tensors.load_linear_no_bias(&format!("{prefix}.gate_proj"), device)?,
-            up_proj: tensors.load_linear_no_bias(&format!("{prefix}.up_proj"), device)?,
-            down_proj: tensors.load_linear_no_bias(&format!("{prefix}.down_proj"), device)?,
+            gate_proj: tensors.load_linear_no_bias::<B>(&format!("{prefix}.gate_proj"), device)?,
+            up_proj: tensors.load_linear_no_bias::<B>(&format!("{prefix}.up_proj"), device)?,
+            down_proj: tensors.load_linear_no_bias::<B>(&format!("{prefix}.down_proj"), device)?,
         })
     }
 
@@ -272,24 +259,24 @@ impl Mlp {
 
 // ── Decoder Layer ───────────────────────────────────────────────────────────
 
-struct DecoderLayer {
-    self_attn: Attention,
-    mlp: Mlp,
+struct DecoderLayer<B: Backend> {
+    self_attn: Attention<B>,
+    mlp: Mlp<B>,
     input_layernorm: RmsNorm<B>,
     post_attention_layernorm: RmsNorm<B>,
 }
 
-impl DecoderLayer {
-    fn load(tensors: &Tensors, prefix: &str, device: &Device) -> anyhow::Result<Self> {
+impl<B: Backend> DecoderLayer<B> {
+    fn load(tensors: &Tensors, prefix: &str, device: &B::Device) -> anyhow::Result<Self> {
         Ok(Self {
             self_attn: Attention::load(tensors, &format!("{prefix}.self_attn"), device)?,
             mlp: Mlp::load(tensors, &format!("{prefix}.mlp"), device)?,
-            input_layernorm: tensors.load_rms_norm(
+            input_layernorm: tensors.load_rms_norm::<B>(
                 &format!("{prefix}.input_layernorm"),
                 RMS_EPS,
                 device,
             )?,
-            post_attention_layernorm: tensors.load_rms_norm(
+            post_attention_layernorm: tensors.load_rms_norm::<B>(
                 &format!("{prefix}.post_attention_layernorm"),
                 RMS_EPS,
                 device,
@@ -301,7 +288,7 @@ impl DecoderLayer {
         &mut self,
         x: &Tensor<B, 3>,
         mask: Option<&Tensor<B, 4>>,
-        rotary: &RotaryEmbedding,
+        rotary: &RotaryEmbedding<B>,
         offset: usize,
     ) -> Tensor<B, 3> {
         let h = self.input_layernorm.forward(x.clone());
@@ -319,19 +306,19 @@ impl DecoderLayer {
 
 // ── Full Decoder ────────────────────────────────────────────────────────────
 
-pub struct Decoder {
+pub struct Decoder<B: Backend> {
     embed_tokens: Embedding<B>,
-    layers: Vec<DecoderLayer>,
+    layers: Vec<DecoderLayer<B>>,
     norm: RmsNorm<B>,
     lm_head_weight: Tensor<B, 2>, // tied with embed_tokens
-    rotary: RotaryEmbedding,
-    device: Device,
+    rotary: RotaryEmbedding<B>,
+    device: B::Device,
 }
 
-impl Decoder {
-    pub fn load(tensors: &Tensors, prefix: &str, device: &Device) -> anyhow::Result<Self> {
+impl<B: Backend> Decoder<B> {
+    pub fn load(tensors: &Tensors, prefix: &str, device: &B::Device) -> anyhow::Result<Self> {
         let embed_tokens =
-            tensors.load_embedding(&format!("{prefix}.model.embed_tokens"), device)?;
+            tensors.load_embedding::<B>(&format!("{prefix}.model.embed_tokens"), device)?;
 
         let mut layers = Vec::with_capacity(N_LAYERS);
         for i in 0..N_LAYERS {
@@ -342,11 +329,8 @@ impl Decoder {
             )?);
         }
 
-        let norm = tensors.load_rms_norm(&format!("{prefix}.model.norm"), RMS_EPS, device)?;
-
-        // Tied embeddings: lm_head shares weights with embed_tokens
+        let norm = tensors.load_rms_norm::<B>(&format!("{prefix}.model.norm"), RMS_EPS, device)?;
         let lm_head_weight = embed_tokens.weight.val();
-
         let rotary = RotaryEmbedding::new(device);
 
         Ok(Self {
@@ -365,9 +349,9 @@ impl Decoder {
             TensorData::new(vec![token_id as i32], [1, 1]),
             &self.device,
         );
-        let out = self.embed_tokens.forward(ids); // [1, 1, hidden]
+        let out = self.embed_tokens.forward(ids);
         let [_, _, h] = out.dims();
-        out.reshape([1, h]) // [1, hidden]
+        out.reshape([1, h])
     }
 
     /// Embed multiple token IDs. Returns [seq, hidden].
@@ -378,9 +362,9 @@ impl Decoder {
             TensorData::new(ids_i32, [1, seq]),
             &self.device,
         );
-        let out = self.embed_tokens.forward(ids); // [1, seq, hidden]
+        let out = self.embed_tokens.forward(ids);
         let [_, _, h] = out.dims();
-        out.reshape([seq, h]) // [seq, hidden]
+        out.reshape([seq, h])
     }
 
     fn causal_mask(&self, tgt: usize, offset: usize) -> Tensor<B, 4> {
@@ -397,7 +381,6 @@ impl Decoder {
         )
     }
 
-    /// Forward pass on embeddings. Returns hidden states [B, L, hidden].
     fn forward_hidden(&mut self, h: &Tensor<B, 3>, offset: usize) -> Tensor<B, 3> {
         let [_, l, _] = h.dims();
         let mask = if l == 1 {
@@ -413,26 +396,24 @@ impl Decoder {
         self.norm.forward(h)
     }
 
-    /// Forward pass with pre-built embeddings (for prefill with audio embeddings).
+    /// Forward pass with pre-built embeddings.
     /// embeds: [seq, hidden] → returns logits [1, vocab]
     pub fn forward_embed(&mut self, embeds: &Tensor<B, 2>, offset: usize) -> Tensor<B, 2> {
-        let embeds_3d = embeds.clone().unsqueeze::<3>(); // [1, seq, hidden]
+        let embeds_3d = embeds.clone().unsqueeze::<3>();
         let h = self.forward_hidden(&embeds_3d, offset);
-        // Take last position
         let seq_len = h.dims()[1];
         let hidden = h.dims()[2];
-        let last: Tensor<B, 2> = h.narrow(1, seq_len - 1, 1).reshape([1, hidden]); // [1, hidden]
+        let last: Tensor<B, 2> = h.narrow(1, seq_len - 1, 1).reshape([1, hidden]);
         last.matmul(self.lm_head_weight.clone().transpose())
     }
 
     /// Forward pass for a single token during autoregressive generation.
-    /// Returns logits [1, vocab].
     pub fn forward_token(&mut self, token_id: u32, offset: usize) -> Tensor<B, 2> {
-        let embed = self.embed_token(token_id); // [1, hidden]
-        let embed_3d = embed.unsqueeze::<3>(); // [1, 1, hidden]
+        let embed = self.embed_token(token_id);
+        let embed_3d = embed.unsqueeze::<3>();
         let h = self.forward_hidden(&embed_3d, offset);
         let hidden = h.dims()[2];
-        let h: Tensor<B, 2> = h.reshape([1, hidden]); // [1, hidden]
+        let h: Tensor<B, 2> = h.reshape([1, hidden]);
         h.matmul(self.lm_head_weight.clone().transpose())
     }
 

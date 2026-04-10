@@ -5,14 +5,13 @@ use burn::nn::{
     conv::Conv2d, Embedding, LayerNorm, LayerNormConfig, Linear, PaddingConfig2d, RmsNorm,
     RmsNormConfig,
 };
+use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 use half::bf16;
 use memmap2::Mmap;
 use safetensors::SafeTensors;
 use std::fs::File;
 use std::path::PathBuf;
-
-use crate::{B, Device};
 
 /// Holds memory-mapped safetensors files and parsed headers.
 pub struct TensorStore {
@@ -85,10 +84,10 @@ impl<'a> Tensors<'a> {
     }
 
     /// Load a tensor with the given const dimension.
-    pub fn load_tensor<const D: usize>(
+    pub fn load_tensor<B: Backend, const D: usize>(
         &self,
         name: &str,
-        device: &Device,
+        device: &B::Device,
     ) -> Result<Tensor<B, D>> {
         let (floats, shape) = self.load_f32_data(name)?;
         let td = TensorData::new(floats, shape);
@@ -96,10 +95,10 @@ impl<'a> Tensors<'a> {
     }
 
     /// Load a linear layer (with bias). Transposes weight from [d_out, d_in] to [d_in, d_out].
-    pub fn load_linear(&self, prefix: &str, device: &Device) -> Result<Linear<B>> {
-        let weight = self.load_tensor::<2>(&format!("{prefix}.weight"), device)?;
+    pub fn load_linear<B: Backend>(&self, prefix: &str, device: &B::Device) -> Result<Linear<B>> {
+        let weight = self.load_tensor::<B, 2>(&format!("{prefix}.weight"), device)?;
         let weight = weight.transpose(); // [d_out, d_in] → [d_in, d_out]
-        let bias = self.load_tensor::<1>(&format!("{prefix}.bias"), device)?;
+        let bias = self.load_tensor::<B, 1>(&format!("{prefix}.bias"), device)?;
         Ok(Linear {
             weight: Param::initialized(ParamId::new(), weight),
             bias: Some(Param::initialized(ParamId::new(), bias)),
@@ -107,8 +106,12 @@ impl<'a> Tensors<'a> {
     }
 
     /// Load a linear layer without bias. Transposes weight.
-    pub fn load_linear_no_bias(&self, prefix: &str, device: &Device) -> Result<Linear<B>> {
-        let weight = self.load_tensor::<2>(&format!("{prefix}.weight"), device)?;
+    pub fn load_linear_no_bias<B: Backend>(
+        &self,
+        prefix: &str,
+        device: &B::Device,
+    ) -> Result<Linear<B>> {
+        let weight = self.load_tensor::<B, 2>(&format!("{prefix}.weight"), device)?;
         let weight = weight.transpose();
         Ok(Linear {
             weight: Param::initialized(ParamId::new(), weight),
@@ -117,17 +120,17 @@ impl<'a> Tensors<'a> {
     }
 
     /// Load a Conv2d layer. No transpose needed (both PyTorch and burn use [out, in, kH, kW]).
-    pub fn load_conv2d(
+    pub fn load_conv2d<B: Backend>(
         &self,
         prefix: &str,
         stride: [usize; 2],
         kernel_size: [usize; 2],
         dilation: [usize; 2],
         groups: usize,
-        device: &Device,
+        device: &B::Device,
     ) -> Result<Conv2d<B>> {
-        let weight = self.load_tensor::<4>(&format!("{prefix}.weight"), device)?;
-        let bias = self.load_tensor::<1>(&format!("{prefix}.bias"), device)?;
+        let weight = self.load_tensor::<B, 4>(&format!("{prefix}.weight"), device)?;
+        let bias = self.load_tensor::<B, 1>(&format!("{prefix}.bias"), device)?;
         Ok(Conv2d {
             weight: Param::initialized(ParamId::new(), weight),
             bias: Some(Param::initialized(ParamId::new(), bias)),
@@ -140,14 +143,14 @@ impl<'a> Tensors<'a> {
     }
 
     /// Load a LayerNorm. Maps weight→gamma, bias→beta.
-    pub fn load_layer_norm(
+    pub fn load_layer_norm<B: Backend>(
         &self,
         prefix: &str,
         epsilon: f64,
-        device: &Device,
+        device: &B::Device,
     ) -> Result<LayerNorm<B>> {
-        let gamma = self.load_tensor::<1>(&format!("{prefix}.weight"), device)?;
-        let beta = self.load_tensor::<1>(&format!("{prefix}.bias"), device)?;
+        let gamma = self.load_tensor::<B, 1>(&format!("{prefix}.weight"), device)?;
+        let beta = self.load_tensor::<B, 1>(&format!("{prefix}.bias"), device)?;
         let d_model = gamma.dims()[0];
         let mut ln = LayerNormConfig::new(d_model)
             .with_epsilon(epsilon)
@@ -158,13 +161,13 @@ impl<'a> Tensors<'a> {
     }
 
     /// Load an RmsNorm. Maps weight→gamma.
-    pub fn load_rms_norm(
+    pub fn load_rms_norm<B: Backend>(
         &self,
         prefix: &str,
         epsilon: f64,
-        device: &Device,
+        device: &B::Device,
     ) -> Result<RmsNorm<B>> {
-        let gamma = self.load_tensor::<1>(&format!("{prefix}.weight"), device)?;
+        let gamma = self.load_tensor::<B, 1>(&format!("{prefix}.weight"), device)?;
         let d_model = gamma.dims()[0];
         let mut rn = RmsNormConfig::new(d_model)
             .with_epsilon(epsilon)
@@ -174,8 +177,12 @@ impl<'a> Tensors<'a> {
     }
 
     /// Load an Embedding. No transpose needed.
-    pub fn load_embedding(&self, prefix: &str, device: &Device) -> Result<Embedding<B>> {
-        let weight = self.load_tensor::<2>(&format!("{prefix}.weight"), device)?;
+    pub fn load_embedding<B: Backend>(
+        &self,
+        prefix: &str,
+        device: &B::Device,
+    ) -> Result<Embedding<B>> {
+        let weight = self.load_tensor::<B, 2>(&format!("{prefix}.weight"), device)?;
         Ok(Embedding {
             weight: Param::initialized(ParamId::new(), weight),
         })
