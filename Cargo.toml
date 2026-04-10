@@ -1,10 +1,10 @@
 [package]
-name = "qwencandle"
-version = "0.0.4-beta7"
+name = "qwen-burn"
+version = "0.0.1-alpha1"
 edition = "2021"
 
 [lib]
-name = "qwencandle"
+name = "qwen_burn"
 
 [dependencies]
 burn = "0.20.1"

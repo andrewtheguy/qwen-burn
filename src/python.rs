@@ -49,8 +49,8 @@ impl QwenAsr {
 }
 
 #[pymodule]
-#[pyo3(name = "qwencandle")]
-fn qwencandle(module: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pyo3(name = "qwen_burn")]
+fn qwen_burn(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<QwenAsr>()?;
     module.add("DEFAULT_MODEL_ID", DEFAULT_MODEL_ID)?;
     module.add(

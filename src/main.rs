@@ -1,9 +1,9 @@
 use anyhow::{bail, Result};
-use qwencandle::{QwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
+use qwen_burn::{QwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
 use std::io::Read;
 
 fn print_usage() {
-    eprintln!("Usage: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle [options]");
+    eprintln!("Usage: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwen-burn [options]");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --model <id>       HuggingFace model ID or local path (default: {DEFAULT_MODEL_ID})");
@@ -16,8 +16,8 @@ fn print_usage() {
     eprintln!("The model is automatically downloaded from HuggingFace on first use.");
     eprintln!();
     eprintln!("Examples:");
-    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle");
-    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle -l Japanese");
+    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwen-burn");
+    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwen-burn -l Japanese");
 }
 
 fn main() -> Result<()> {
@@ -110,21 +110,21 @@ fn read_wav_stdin() -> Result<Vec<f32>> {
             if audio_format != 3 || bits_per_sample != 32 {
                 bail!(
                     "Wrong WAV format: audio_format={} bits={} (expected float32).\n\
-                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle",
+                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwen-burn",
                     audio_format, bits_per_sample,
                 );
             }
             if num_channels != 1 {
                 bail!(
                     "Wrong WAV channels: {} (expected mono).\n\
-                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle",
+                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwen-burn",
                     num_channels,
                 );
             }
             if sample_rate != 16000 {
                 bail!(
                     "Wrong WAV sample rate: {} (expected 16000).\n\
-                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle",
+                     Convert with: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwen-burn",
                     sample_rate,
                 );
             }

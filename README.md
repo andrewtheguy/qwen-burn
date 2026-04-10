@@ -1,4 +1,4 @@
-# qwencandle
+# qwen-burn
 
 Qwen3-ASR-0.6B speech-to-text inference in Rust, built on [Burn](https://github.com/tracel-ai/burn).
 
@@ -19,7 +19,7 @@ cargo build --release
 Input is WAV float32 16kHz mono on stdin. Use ffmpeg to convert any audio format:
 
 ```
-ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | ./target/release/qwencandle
+ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | ./target/release/qwen-burn
 ```
 
 The model is automatically downloaded from HuggingFace on first use and cached in `~/.cache/huggingface/`.
@@ -38,7 +38,7 @@ The model is automatically downloaded from HuggingFace on first use and cached i
 By default the model auto-detects the spoken language. Use `--language` to force a specific output language:
 
 ```
-ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | ./target/release/qwencandle --language Japanese
+ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | ./target/release/qwen-burn --language Japanese
 ```
 
 Supported languages: Chinese, English, Cantonese, Arabic, German, French, Spanish, Portuguese, Indonesian, Italian, Korean, Russian, Thai, Vietnamese, Japanese, Turkish, Hindi, Malay, Dutch, Swedish, Danish, Finnish, Polish, Czech, Filipino, Persian, Greek, Romanian, Hungarian, Macedonian.
@@ -48,7 +48,7 @@ Supported languages: Chinese, English, Cantonese, Arabic, German, French, Spanis
 Pass previous transcript text to improve consistency across segments:
 
 ```
-ffmpeg -i segment2.wav -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | ./target/release/qwencandle --context "Previously the speaker discussed climate change."
+ffmpeg -i segment2.wav -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | ./target/release/qwen-burn --context "Previously the speaker discussed climate change."
 ```
 
 ### Local model
@@ -57,14 +57,14 @@ To use a locally downloaded model instead of auto-downloading:
 
 ```
 huggingface-cli download Qwen/Qwen3-ASR-0.6B --local-dir qwen3-asr-0.6b
-ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | ./target/release/qwencandle --model ./qwen3-asr-0.6b
+ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | ./target/release/qwen-burn --model ./qwen3-asr-0.6b
 ```
 
 ## Rust library
 
 ```rust
 use burn_ndarray::NdArray;
-use qwencandle::QwenAsr;
+use qwen_burn::QwenAsr;
 
 let mut model = QwenAsr::<NdArray>::load("Qwen/Qwen3-ASR-0.6B")?;
 let text = model.transcribe(&samples, Some("English"), None)?;
@@ -79,13 +79,13 @@ let text = model.transcribe(&samples, Some("English"), None)?;
 change `VERSION` to the version you want to install (e.g. `0.0.1a1`):
 
 ```
-pip install --extra-index-url https://andrewtheguy.github.io/qwencandle/simple/ qwencandle==VERSION
+pip install --extra-index-url https://andrewtheguy.github.io/qwen-burn/simple/ qwen_burn==VERSION
 ```
 
 Or with uv:
 
 ```
-uv pip install --extra-index-url https://andrewtheguy.github.io/qwencandle/simple/ qwencandle==VERSION
+uv pip install --extra-index-url https://andrewtheguy.github.io/qwen-burn/simple/ qwen_burn==VERSION
 ```
 
 ### Install from source
@@ -100,9 +100,9 @@ maturin develop --release
 
 ```python
 import numpy as np
-import qwencandle
+import qwen_burn
 
-model = qwencandle.QwenAsr()  # auto-downloads from HuggingFace
+model = qwen_burn.QwenAsr()  # auto-downloads from HuggingFace
 text = model.transcribe(samples)  # samples: numpy float32 array, 16kHz mono
 
 # with options
@@ -112,8 +112,8 @@ text = model.transcribe(samples, language="English", context="Previous sentence.
 ### API
 
 ```python
-qwencandle.DEFAULT_MODEL_ID   # "Qwen/Qwen3-ASR-0.6B"
-qwencandle.SUPPORTED_LANGUAGES  # list of 30 language names
+qwen_burn.DEFAULT_MODEL_ID   # "Qwen/Qwen3-ASR-0.6B"
+qwen_burn.SUPPORTED_LANGUAGES  # list of 30 language names
 
 class QwenAsr:
     def __init__(self, model_id=None): ...

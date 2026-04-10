@@ -27,7 +27,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          mkdir -p _pages/simple/qwencandle
+          mkdir -p _pages/simple/qwen_burn
 
           {
             echo '<!DOCTYPE html><html><body>'
@@ -37,11 +37,11 @@ jobs:
               done
             done
             echo '</body></html>'
-          } > _pages/simple/qwencandle/index.html
+          } > _pages/simple/qwen_burn/index.html
 
           cat > _pages/simple/index.html <<'HTML'
           <!DOCTYPE html><html><body>
-          <a href="qwencandle/">qwencandle</a>
+          <a href="qwen_burn/">qwen_burn</a>
           </body></html>
           HTML
 

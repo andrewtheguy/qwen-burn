@@ -40,7 +40,7 @@ jobs:
       - name: Transcribe JFK fixture
         run: |
           set -eo pipefail
-          output=$(cat fixtures/jfk.wav | ./target/release/qwencandle)
+          output=$(cat fixtures/jfk.wav | ./target/release/qwen-burn)
           echo "Output: $output"
           echo "$output" | grep -qi "ask not what your country can do for you"
 
@@ -82,7 +82,7 @@ jobs:
       - name: Transcribe JFK fixture
         run: |
           set -eo pipefail
-          output=$(cat fixtures/jfk.wav | ./target/release/qwencandle)
+          output=$(cat fixtures/jfk.wav | ./target/release/qwen-burn)
           echo "Output: $output"
           echo "$output" | grep -qi "ask not what your country can do for you"
 
