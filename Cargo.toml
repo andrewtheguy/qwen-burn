@@ -1,14 +1,14 @@
 [package]
 name = "qwen-burn"
-version = "0.0.1-alpha2"
+version = "0.0.1-alpha3"
 edition = "2021"
 
 [lib]
 name = "qwen_burn"
 
 [dependencies]
-burn = "0.20.1"
-burn-ndarray = "0.20.1"
+burn = { version = "0.20.1", default-features = false, features = ["std", "ndarray"] }
+burn-ndarray = { version = "0.20.1", default-features = false, features = ["std"] }
 safetensors = "0.7.0"
 memmap2 = "0.9"
 half = { version = "2", features = ["num-traits"] }
