@@ -125,6 +125,12 @@ jobs:
           mv "$LLVM_DIR/tracel-llvm-20.1.4-6" "$LLVM_DIR/tracel-llvm-20.1.4-7"
           touch "$LLVM_DIR/tracel-llvm-20.1.4-7/.tracel-llvm-installed"
 
+      # On Windows, tracel-mlir-sys (LLVM) is built with /MD (dynamic CRT).
+      # Force Rust to match, which is also correct for Python extensions.
+      - name: Set dynamic CRT on Windows
+        if: runner.os == 'Windows'
+        run: echo "RUSTFLAGS=-C target-feature=-crt-static" >> $env:GITHUB_ENV
+
       - name: Build wheel
         env:
           PYO3_PYTHON: python
