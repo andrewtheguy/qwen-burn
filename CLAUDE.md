@@ -2,3 +2,4 @@
 - uses burn v0.20.1 with burn-ndarray backend (CPU only)
 - run `cat fixtures/jfk.wav | cargo run --release` to test after rust code changes
 - run `cargo clippy` to check for clippy warnings
+- use ./tmp/ for temporary artifacts so that it is easier to inspect
