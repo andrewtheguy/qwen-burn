@@ -1,21 +1,21 @@
-use crate::{QwenAsr as RustQwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
+use crate::{QwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
 use numpy::PyReadonlyArray1;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 use std::sync::Mutex;
 
 #[pyclass]
-struct QwenAsr {
-    inner: Mutex<RustQwenAsr<burn_ndarray::NdArray<f32>>>,
+struct QwenAsrPy {
+    inner: Mutex<QwenAsr<burn_ndarray::NdArray<f32>>>,
 }
 
 #[pymethods]
-impl QwenAsr {
+impl QwenAsrPy {
     #[new]
     #[pyo3(signature = (model_id=None))]
     fn new(model_id: Option<&str>) -> PyResult<Self> {
         let model_id = model_id.unwrap_or(DEFAULT_MODEL_ID);
         let dev = burn_ndarray::NdArrayDevice::Cpu;
-        let model = RustQwenAsr::<burn_ndarray::NdArray>::load_on(model_id, &dev)
+        let model = QwenAsr::<burn_ndarray::NdArray>::load_on(model_id, &dev)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self {
             inner: Mutex::new(model),
@@ -51,7 +51,7 @@ impl QwenAsr {
 #[pymodule]
 #[pyo3(name = "qwen_burn")]
 fn qwen_burn(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_class::<QwenAsr>()?;
+    module.add_class::<QwenAsrPy>()?;
     module.add("DEFAULT_MODEL_ID", DEFAULT_MODEL_ID)?;
     module.add(
         "SUPPORTED_LANGUAGES",
