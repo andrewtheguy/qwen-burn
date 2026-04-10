@@ -124,7 +124,7 @@ jobs:
         run: |
           LLVM_DIR="$HOME/.local/share/tracel"
           mkdir -p "$LLVM_DIR"
-          curl -sL https://github.com/andrewtheguy/qwencandle/releases/download/v0.0.1a1/tracel-llvm-20.1.4-7-linux-AArch64.tar.gz | tar xx -C "$LLVM_DIR"
+          curl -sL https://github.com/andrewtheguy/qwencandle/releases/download/v0.0.1a1/tracel-llvm-20.1.4-7-linux-AArch64.tar.gz | tar xz -C "$LLVM_DIR"
           touch "$LLVM_DIR/tracel-llvm-20.1.4-7/.tracel-llvm-installed"
 
       # On Windows, tracel-mlir-sys (LLVM) is built with /MD (dynamic CRT).
