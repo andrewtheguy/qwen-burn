@@ -68,7 +68,7 @@ impl<B: Backend> EncoderAttention<B> {
         let ctx = probs.matmul(v); // [1, n_heads, seq, head_dim]
 
         let out = ctx
-            .squeeze::<3>()
+            .squeeze_dim::<3>(0)
             .swap_dims(0, 1)
             .reshape([seq_len, D_MODEL]);
         self.out_proj.forward2d(out)
