@@ -91,7 +91,7 @@ jobs:
             extra-features: ""
           - arch: arm64
             runs-on: macos-latest
-            extra-features: "metal"
+            extra-features: ""
     runs-on: ${{ matrix.runs-on }}
 
     steps:

@@ -6,7 +6,7 @@ SUPPORTED_LANGUAGES: list[str]
 
 class QwenAsr:
     def __init__(
-        self, model_id: str | None = None, device: str = "cpu"
+        self, model_id: str | None = None,
     ) -> None: ...
     def transcribe(
         self,

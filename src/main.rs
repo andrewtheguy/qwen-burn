@@ -1,5 +1,4 @@
 use anyhow::{bail, Result};
-use burn::tensor::backend::Backend;
 use qwencandle::{QwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
 use std::io::Read;
 
@@ -8,7 +7,6 @@ fn print_usage() {
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --model <id>       HuggingFace model ID or local path (default: {DEFAULT_MODEL_ID})");
-    eprintln!("  --device <dev>     Device: auto, cpu, gpu/metal (default: auto)");
     eprintln!("  --language <lang>  Force output language (e.g. English, Chinese, Japanese)");
     eprintln!("  --context <text>   Condition on previous text (system prompt for consistency)");
     eprintln!();
@@ -19,14 +17,7 @@ fn print_usage() {
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle");
-    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle --device cpu");
-    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle --device gpu");
     eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle -l Japanese");
-}
-
-fn run<B: Backend>(model_id: &str, device: &B::Device, samples: &[f32], language: Option<&str>, context: Option<&str>) -> Result<String> {
-    let mut model = QwenAsr::<B>::load_on(model_id, device)?;
-    model.transcribe(samples, language, context)
 }
 
 fn main() -> Result<()> {
@@ -34,7 +25,6 @@ fn main() -> Result<()> {
     let mut model_id: Option<String> = None;
     let mut language: Option<String> = None;
     let mut context: Option<String> = None;
-    let mut device_str: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -54,11 +44,6 @@ fn main() -> Result<()> {
                 if i >= args.len() { bail!("--context requires a value"); }
                 context = Some(args[i].clone());
             }
-            "--device" | "-d" => {
-                i += 1;
-                if i >= args.len() { bail!("--device requires a value"); }
-                device_str = Some(args[i].clone());
-            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -73,31 +58,11 @@ fn main() -> Result<()> {
     let samples = read_wav_stdin()?;
     eprintln!("Audio: {} samples ({:.1}s)", samples.len(), samples.len() as f32 / 16000.0);
 
-    let device_key = device_str.as_deref().unwrap_or("auto").to_lowercase();
-
-    let text = match device_key.as_str() {
-        "cpu" => {
-            use burn_ndarray::{NdArray, NdArrayDevice};
-            let device = NdArrayDevice::Cpu;
-            eprintln!("Loading model on CPU...");
-            run::<NdArray>(&model_id, &device, &samples, language.as_deref(), context.as_deref())?
-        }
-        #[cfg(feature = "metal")]
-        "auto" | "gpu" | "metal" | "mps" => {
-            use burn_tch::{LibTorch, LibTorchDevice};
-            let device = LibTorchDevice::Mps;
-            eprintln!("Loading model on Metal (MPS)...");
-            run::<LibTorch>(&model_id, &device, &samples, language.as_deref(), context.as_deref())?
-        }
-        #[cfg(not(feature = "metal"))]
-        "auto" => {
-            use burn_ndarray::{NdArray, NdArrayDevice};
-            let device = NdArrayDevice::Cpu;
-            eprintln!("Loading model on CPU...");
-            run::<NdArray>(&model_id, &device, &samples, language.as_deref(), context.as_deref())?
-        }
-        other => bail!("Unknown device: {}. Supported: auto, cpu, gpu/metal", other),
-    };
+    use burn_ndarray::{NdArray, NdArrayDevice};
+    let device = NdArrayDevice::Cpu;
+    eprintln!("Loading model on CPU...");
+    let mut model = QwenAsr::<NdArray>::load_on(&model_id, &device)?;
+    let text = model.transcribe(&samples, language.as_deref(), context.as_deref())?;
 
     println!("{text}");
     Ok(())

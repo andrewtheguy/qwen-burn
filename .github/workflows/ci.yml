@@ -76,8 +76,8 @@ jobs:
       - name: Run Rust tests
         run: cargo test
 
-      - name: Build with Metal
-        run: cargo build --release --features metal
+      - name: Build release binary
+        run: cargo build --release
 
       - name: Transcribe JFK fixture
         run: |

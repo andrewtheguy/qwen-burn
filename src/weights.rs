@@ -84,9 +84,7 @@ impl<'a> Tensors<'a> {
     }
 
     /// Load a tensor with the given const dimension.
-    /// Creates the tensor on the default device first, then moves to the target
-    /// device. This avoids the LibTorch MPS "Placeholder storage" bug where
-    /// `from_data` directly on MPS panics.
+    /// Creates the tensor on the default device first, then moves to the target device.
     pub fn load_tensor<B: Backend, const D: usize>(
         &self,
         name: &str,

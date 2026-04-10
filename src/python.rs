@@ -3,68 +3,22 @@ use numpy::PyReadonlyArray1;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 use std::sync::Mutex;
 
-enum Inner {
-    #[cfg(feature = "metal")]
-    Gpu(Box<RustQwenAsr<burn_tch::LibTorch<f32>>>),
-    Cpu(Box<RustQwenAsr<burn_ndarray::NdArray<f32>>>),
-}
-
-impl Inner {
-    fn transcribe(
-        &mut self,
-        samples: &[f32],
-        language: Option<&str>,
-        context: Option<&str>,
-    ) -> anyhow::Result<String> {
-        match self {
-            #[cfg(feature = "metal")]
-            Inner::Gpu(m) => m.transcribe(samples, language, context),
-            Inner::Cpu(m) => m.transcribe(samples, language, context),
-        }
-    }
-}
-
 #[pyclass]
 struct QwenAsr {
-    inner: Mutex<Inner>,
+    inner: Mutex<RustQwenAsr<burn_ndarray::NdArray<f32>>>,
 }
 
 #[pymethods]
 impl QwenAsr {
     #[new]
-    #[pyo3(signature = (model_id=None, device="auto"))]
-    fn new(model_id: Option<&str>, device: &str) -> PyResult<Self> {
+    #[pyo3(signature = (model_id=None))]
+    fn new(model_id: Option<&str>) -> PyResult<Self> {
         let model_id = model_id.unwrap_or(DEFAULT_MODEL_ID);
-        let inner = match device.to_lowercase().as_str() {
-            "cpu" => {
-                let dev = burn_ndarray::NdArrayDevice::Cpu;
-                let model = RustQwenAsr::<burn_ndarray::NdArray>::load_on(model_id, &dev)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                Inner::Cpu(Box::new(model))
-            }
-            #[cfg(feature = "metal")]
-            "auto" | "metal" | "mps" | "gpu" => {
-                let dev = burn_tch::LibTorchDevice::Mps;
-                let model = RustQwenAsr::<burn_tch::LibTorch>::load_on(model_id, &dev)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                Inner::Gpu(Box::new(model))
-            }
-            #[cfg(not(feature = "metal"))]
-            "auto" | "gpu" => {
-                let dev = burn_ndarray::NdArrayDevice::Cpu;
-                let model = RustQwenAsr::<burn_ndarray::NdArray>::load_on(model_id, &dev)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                Inner::Cpu(Box::new(model))
-            }
-            _ => {
-                return Err(PyRuntimeError::new_err(format!(
-                    "Unknown device: {}. Supported: auto, cpu, gpu/metal",
-                    device
-                )));
-            }
-        };
+        let dev = burn_ndarray::NdArrayDevice::Cpu;
+        let model = RustQwenAsr::<burn_ndarray::NdArray>::load_on(model_id, &dev)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self {
-            inner: Mutex::new(inner),
+            inner: Mutex::new(model),
         })
     }
 

@@ -8,8 +8,6 @@ name = "qwencandle"
 
 [dependencies]
 burn = "0.20.1"
-burn-tch = { version = "0.20.1", optional = true }
-burn-cuda = { version = "0.20.1", optional = true }
 burn-ndarray = "0.20.1"
 safetensors = "0.7.0"
 memmap2 = "0.9"
@@ -25,7 +23,4 @@ numpy = { version = "0.27", optional = true }
 
 [features]
 default = []
-accelerate = ["burn-ndarray/blas-accelerate"]
-metal = ["dep:burn-tch", "accelerate"]
-cuda = ["burn-cuda"]
 python = ["dep:pyo3", "dep:numpy"]

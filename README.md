@@ -4,20 +4,14 @@ Qwen3-ASR-0.6B speech-to-text inference in Rust, built on [Burn](https://github.
 
 ## Motivation
 
-The main existing Python implementations of Qwen ASR (via PyTorch / Transformers) suffer from memory leaks when running inference repeatedly on Apple Silicon with Metal/MPS. Memory grows with each transcription call and is never fully reclaimed, eventually forcing a restart. This makes them unsuitable for long-running services or batch processing workflows on macOS.
+The main existing Python implementations of Qwen ASR (via PyTorch / Transformers) suffer from memory leaks when running inference repeatedly. Memory grows with each transcription call and is never fully reclaimed, eventually forcing a restart. This makes them unsuitable for long-running services or batch processing workflows.
 
-This project reimplements Qwen3-ASR inference in Rust using the [Burn](https://github.com/tracel-ai/burn) deep learning framework with the wgpu backend, which provides Metal GPU support without the memory leak issues. The result is a lightweight, memory-stable binary (and Python library) that can transcribe audio indefinitely on Metal without degradation.
+This project reimplements Qwen3-ASR inference in Rust using the [Burn](https://github.com/tracel-ai/burn) deep learning framework. The result is a lightweight, memory-stable binary (and Python library) that can transcribe audio indefinitely without degradation.
 
 ## Build
 
 ```
 cargo build --release
-```
-
-With Metal GPU acceleration (macOS):
-
-```
-cargo build --release --features metal
 ```
 
 ## Usage
@@ -34,20 +28,9 @@ The model is automatically downloaded from HuggingFace on first use and cached i
 
 ```
 --model <id>       HuggingFace model ID or local path (default: Qwen/Qwen3-ASR-0.6B)
---device <dev>     Device: cpu, metal (default: cpu)
 --language <lang>  Force output language (e.g. English, Chinese, Japanese)
 --context <text>   Condition on previous text (system prompt for consistency)
 --help             Show help
-```
-
-### Thread count
-
-### Metal GPU
-
-On macOS, build with `--features metal` and use `--device metal` for GPU acceleration:
-
-```
-ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | ./target/release/qwencandle --device metal
 ```
 
 ### Language forcing
@@ -80,14 +63,14 @@ ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | ./target/releas
 ## Rust library
 
 ```rust
-use burn_wgpu::Wgpu;
+use burn_ndarray::NdArray;
 use qwencandle::QwenAsr;
 
-let mut model = QwenAsr::<Wgpu>::load("Qwen/Qwen3-ASR-0.6B")?;
+let mut model = QwenAsr::<NdArray>::load("Qwen/Qwen3-ASR-0.6B")?;
 let text = model.transcribe(&samples, Some("English"), None)?;
 ```
 
-`QwenAsr` is generic over burn's `Backend` trait. Swap `Wgpu` for `burn_cpu::Cpu` to run on CPU instead.
+`QwenAsr` is generic over burn's `Backend` trait — any burn backend can be substituted.
 
 ## Python bindings
 
@@ -113,12 +96,6 @@ uv pip install numpy maturin
 maturin develop --release
 ```
 
-With Metal GPU support:
-
-```
-maturin develop --release --features metal
-```
-
 ### Usage
 
 ```python
@@ -129,7 +106,6 @@ model = qwencandle.QwenAsr()  # auto-downloads from HuggingFace
 text = model.transcribe(samples)  # samples: numpy float32 array, 16kHz mono
 
 # with options
-model = qwencandle.QwenAsr(device="metal")
 text = model.transcribe(samples, language="English", context="Previous sentence.")
 ```
 
@@ -140,6 +116,6 @@ qwencandle.DEFAULT_MODEL_ID   # "Qwen/Qwen3-ASR-0.6B"
 qwencandle.SUPPORTED_LANGUAGES  # list of 30 language names
 
 class QwenAsr:
-    def __init__(self, model_id=None, device="auto"): ...
+    def __init__(self, model_id=None): ...
     def transcribe(self, samples, *, language=None, context=None) -> str: ...
 ```
