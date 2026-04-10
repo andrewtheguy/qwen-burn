@@ -1,11 +1,11 @@
-use crate::{QwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
+use crate::{QwenAsr as RustQwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
 use numpy::PyReadonlyArray1;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 use std::sync::Mutex;
 
 enum Inner {
-    Gpu(QwenAsr<burn_wgpu::Wgpu<f32, i32>>),
-    Cpu(QwenAsr<burn_cpu::Cpu<f32, i32>>),
+    Gpu(RustQwenAsr<burn_wgpu::Wgpu<f32, i32>>),
+    Cpu(RustQwenAsr<burn_cpu::Cpu<f32, i32>>),
 }
 
 impl Inner {
@@ -23,12 +23,12 @@ impl Inner {
 }
 
 #[pyclass]
-struct QwenAsrPy {
+struct QwenAsr {
     inner: Mutex<Inner>,
 }
 
 #[pymethods]
-impl QwenAsrPy {
+impl QwenAsr {
     #[new]
     #[pyo3(signature = (model_id=None, device="auto"))]
     fn new(model_id: Option<&str>, device: &str) -> PyResult<Self> {
@@ -36,13 +36,13 @@ impl QwenAsrPy {
         let inner = match device.to_lowercase().as_str() {
             "cpu" => {
                 let dev = burn_cpu::CpuDevice::default();
-                let model = QwenAsr::<burn_cpu::Cpu>::load_on(model_id, &dev)
+                let model = RustQwenAsr::<burn_cpu::Cpu>::load_on(model_id, &dev)
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
                 Inner::Cpu(model)
             }
             "auto" | "metal" | "mps" | "gpu" => {
                 let dev = burn_wgpu::WgpuDevice::DefaultDevice;
-                let model = QwenAsr::<burn_wgpu::Wgpu>::load_on(model_id, &dev)
+                let model = RustQwenAsr::<burn_wgpu::Wgpu>::load_on(model_id, &dev)
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
                 Inner::Gpu(model)
             }
@@ -87,7 +87,7 @@ impl QwenAsrPy {
 #[pymodule]
 #[pyo3(name = "qwencandle")]
 fn qwencandle(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_class::<QwenAsrPy>()?;
+    module.add_class::<QwenAsr>()?;
     module.add("DEFAULT_MODEL_ID", DEFAULT_MODEL_ID)?;
     module.add(
         "SUPPORTED_LANGUAGES",
