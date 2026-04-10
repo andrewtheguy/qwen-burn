@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 pub mod audio;
 mod decoder;
 mod encoder;
