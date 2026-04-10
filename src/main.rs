@@ -77,10 +77,10 @@ fn main() -> Result<()> {
 
     let text = match device_key.as_str() {
         "cpu" => {
-            use burn_cpu::{Cpu, CpuDevice};
-            let device = CpuDevice;
+            use burn_ndarray::{NdArray, NdArrayDevice};
+            let device = NdArrayDevice::Cpu;
             eprintln!("Loading model on CPU...");
-            run::<Cpu>(&model_id, &device, &samples, language.as_deref(), context.as_deref())?
+            run::<NdArray>(&model_id, &device, &samples, language.as_deref(), context.as_deref())?
         }
         "auto" | "gpu" | "metal" | "mps" => {
             use burn_tch::{LibTorch, LibTorchDevice};
