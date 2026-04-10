@@ -1,16 +1,14 @@
 use anyhow::{bail, Result};
-use burn_wgpu::{Wgpu, WgpuDevice};
+use burn::tensor::backend::Backend;
 use qwencandle::{QwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
 use std::io::Read;
-
-type B = Wgpu<f32, i32>;
 
 fn print_usage() {
     eprintln!("Usage: ffmpeg -i INPUT -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle [options]");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --model <id>       HuggingFace model ID or local path (default: {DEFAULT_MODEL_ID})");
-    eprintln!("  --device <dev>     Device: auto, gpu/metal (default: auto)");
+    eprintln!("  --device <dev>     Device: auto, cpu, gpu/metal (default: auto)");
     eprintln!("  --language <lang>  Force output language (e.g. English, Chinese, Japanese)");
     eprintln!("  --context <text>   Condition on previous text (system prompt for consistency)");
     eprintln!();
@@ -21,16 +19,14 @@ fn print_usage() {
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle");
+    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle --device cpu");
     eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle --device gpu");
     eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle -l Japanese");
-    eprintln!("  ffmpeg -i audio.mp3 -ac 1 -ar 16000 -f wav -acodec pcm_f32le - | qwencandle --context \"Previous sentence.\"");
 }
 
-fn parse_device(s: &str) -> Result<WgpuDevice> {
-    match s.to_lowercase().as_str() {
-        "auto" | "metal" | "mps" | "gpu" => Ok(WgpuDevice::DefaultDevice),
-        _ => bail!("Unknown device: {}. Supported: auto, gpu/metal", s),
-    }
+fn run<B: Backend>(model_id: &str, device: &B::Device, samples: &[f32], language: Option<&str>, context: Option<&str>) -> Result<String> {
+    let mut model = QwenAsr::<B>::load_on(model_id, device)?;
+    model.transcribe(samples, language, context)
 }
 
 fn main() -> Result<()> {
@@ -73,24 +69,29 @@ fn main() -> Result<()> {
     }
 
     let model_id = model_id.unwrap_or_else(|| DEFAULT_MODEL_ID.to_string());
-    let device = match &device_str {
-        Some(d) => parse_device(d)?,
-        None => WgpuDevice::DefaultDevice,
-    };
 
     let samples = read_wav_stdin()?;
     eprintln!("Audio: {} samples ({:.1}s)", samples.len(), samples.len() as f32 / 16000.0);
 
-    eprintln!("Loading model on {:?}...", device);
-    let mut model = QwenAsr::<B>::load_on(&model_id, &device)?;
+    let device_key = device_str.as_deref().unwrap_or("auto").to_lowercase();
 
-    let text = model.transcribe(
-        &samples,
-        language.as_deref(),
-        context.as_deref(),
-    )?;
+    let text = match device_key.as_str() {
+        "cpu" => {
+            use burn_cpu::{Cpu, CpuDevice};
+            let device = CpuDevice;
+            eprintln!("Loading model on CPU...");
+            run::<Cpu>(&model_id, &device, &samples, language.as_deref(), context.as_deref())?
+        }
+        "auto" | "gpu" | "metal" | "mps" => {
+            use burn_wgpu::{Wgpu, WgpuDevice};
+            let device = WgpuDevice::DefaultDevice;
+            eprintln!("Loading model on GPU...");
+            run::<Wgpu>(&model_id, &device, &samples, language.as_deref(), context.as_deref())?
+        }
+        other => bail!("Unknown device: {}. Supported: auto, cpu, gpu/metal", other),
+    };
+
     println!("{text}");
-
     Ok(())
 }
 

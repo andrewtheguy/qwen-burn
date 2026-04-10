@@ -1,24 +1,30 @@
 use crate::{QwenAsr, DEFAULT_MODEL_ID, SUPPORTED_LANGUAGES};
-use burn_wgpu::{Wgpu, WgpuDevice};
 use numpy::PyReadonlyArray1;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 use std::sync::Mutex;
 
-type B = Wgpu<f32, i32>;
+enum Inner {
+    Gpu(QwenAsr<burn_wgpu::Wgpu<f32, i32>>),
+    Cpu(QwenAsr<burn_cpu::Cpu<f32, i32>>),
+}
 
-fn parse_device(device: &str) -> PyResult<WgpuDevice> {
-    match device.to_lowercase().as_str() {
-        "auto" | "metal" | "mps" | "gpu" => Ok(WgpuDevice::DefaultDevice),
-        _ => Err(PyRuntimeError::new_err(format!(
-            "Unknown device: {}. Supported: auto, gpu/metal",
-            device
-        ))),
+impl Inner {
+    fn transcribe(
+        &mut self,
+        samples: &[f32],
+        language: Option<&str>,
+        context: Option<&str>,
+    ) -> anyhow::Result<String> {
+        match self {
+            Inner::Gpu(m) => m.transcribe(samples, language, context),
+            Inner::Cpu(m) => m.transcribe(samples, language, context),
+        }
     }
 }
 
 #[pyclass]
 struct QwenAsrPy {
-    inner: Mutex<QwenAsr<B>>,
+    inner: Mutex<Inner>,
 }
 
 #[pymethods]
@@ -27,9 +33,26 @@ impl QwenAsrPy {
     #[pyo3(signature = (model_id=None, device="auto"))]
     fn new(model_id: Option<&str>, device: &str) -> PyResult<Self> {
         let model_id = model_id.unwrap_or(DEFAULT_MODEL_ID);
-        let device = parse_device(device)?;
-        let inner = QwenAsr::<B>::load_on(model_id, &device)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let inner = match device.to_lowercase().as_str() {
+            "cpu" => {
+                let dev = burn_cpu::CpuDevice::default();
+                let model = QwenAsr::<burn_cpu::Cpu>::load_on(model_id, &dev)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                Inner::Cpu(model)
+            }
+            "auto" | "metal" | "mps" | "gpu" => {
+                let dev = burn_wgpu::WgpuDevice::DefaultDevice;
+                let model = QwenAsr::<burn_wgpu::Wgpu>::load_on(model_id, &dev)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                Inner::Gpu(model)
+            }
+            _ => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Unknown device: {}. Supported: auto, cpu, gpu/metal",
+                    device
+                )));
+            }
+        };
         Ok(Self {
             inner: Mutex::new(inner),
         })

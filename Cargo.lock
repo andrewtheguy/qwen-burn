@@ -4715,6 +4715,7 @@ version = "0.0.4-beta2"
 dependencies = [
  "anyhow",
  "burn",
+ "burn-cpu",
  "burn-cuda",
  "burn-wgpu",
  "half",
